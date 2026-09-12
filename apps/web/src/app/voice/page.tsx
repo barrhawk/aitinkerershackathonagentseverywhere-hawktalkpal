@@ -311,9 +311,16 @@ export default function VoicePage() {
     }
   }, [holding, openTurn, copilotTurn, wakePhrase]); // eslint-disable-line react-hooks/exhaustive-deps
   const onWakeRef = useRef(onWake); useEffect(() => { onWakeRef.current = onWake; }, [onWake]);
+  // Native wake word: the Android wrapper app listens with the system recognizer (a WebView has no
+  // Web Speech API) and dispatches this event on the page when it hears the phrase.
+  useEffect(() => {
+    const h = () => { if (status === "live") onWakeRef.current(); };
+    window.addEventListener("hawk-wake", h);
+    return () => window.removeEventListener("hawk-wake", h);
+  }, [status]);
   useEffect(() => {
     if (status !== "live" || !wakeOn) { wakeRef.current?.stop(); wakeRef.current = null; if (status === "live" && oaRef.current) oaRef.current.mute(false); if (!wakeOn) setWakeState(undefined); return; }
-    if (!wakeWordSupported()) { setWakeState("wake word needs Chrome; use the orb"); return; }
+    if (!wakeWordSupported()) { setWakeState(/\bwv\b/.test(navigator.userAgent) ? `app is listening for "${wakePhrase}"` : "wake word needs Chrome; use the orb"); return; }
     const w = new WakeWord(wakePhrase, () => onWakeRef.current(), setWakeState); wakeRef.current = w; w.start();
     if (oaRef.current) oaRef.current.mute(true);
     return () => { w.stop(); };
