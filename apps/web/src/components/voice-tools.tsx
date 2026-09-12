@@ -5,9 +5,16 @@
  * "HawkTalk ears + CopilotKit agent" mode. Same three tools as the realtime
  * providers, and the same page-level approval sheet and result cards: the page
  * hands in `gate` and `onResult`, so nothing here renders on its own.
+ *
+ * Generative UI: `workplace_record` is a component the agent draws after a
+ * write, from the fields the tool handed back. Inside CopilotChat (the
+ * companion page) it renders in the transcript; on the voice page, which has
+ * no chat widget, `<AgentCards names={["workplace_record"]} />` draws it.
  */
-import { useAgentContext, useFrontendTool } from "@copilotkit/react-core/v2";
+import { useAgentContext, useComponent, useFrontendTool } from "@copilotkit/react-core/v2";
 import { z } from "zod";
+
+import { WorkplaceRecordCard, toWorkplaceRecord } from "./workplace-record";
 
 export type WorkplaceResult = { ok: boolean; status: number; ms?: number; record: unknown };
 
@@ -26,7 +33,7 @@ export function VoiceTools({ mode, gate, onResult }: {
     description: "Voice mode for this session. The user is speaking, and your text reply is read aloud by HawkTalk.",
     value: {
       mode,
-      rules: ["Reply in one or two sentences.", "Never read out URLs, ids or code; describe them.", "Before a workplace write, say what you will file in one sentence, then call note_it or tell_team; the user approves with a tap or by saying yes.", "If a tool reports an error, say so; never claim success without a record.", "The user may start with a wake phrase such as 'hey hawk'; ignore it."],
+      rules: ["Reply in one or two sentences.", "Never read out URLs, ids or code; describe them.", "Before a workplace write, say what you will file in one sentence, then call note_it or tell_team; the user approves with a tap or by saying yes.", "If a tool reports an error, say so; never claim success without a record.", "After note_it or tell_team returns, call workplace_record with exactly the fields it returned (kind, title, id, url, ms, ok) and, in the same reply, tell the user in one sentence what happened.", "The user may start with a wake phrase such as 'hey hawk'; ignore it."],
     },
   });
 
@@ -46,7 +53,8 @@ export function VoiceTools({ mode, gate, onResult }: {
     if (!ok) { onResult(name, { ok: false, status: 0, record: "declined by user" }); return "The user declined. Nothing was changed. Say so plainly."; }
     const res = await workplace(name, args);
     onResult(name, res);
-    return res.ok ? `Done in ${res.ms ?? "?"} ms. Record: ${JSON.stringify(res.record).slice(0, 400)}` : `Failed with HTTP ${res.status}: ${JSON.stringify(res.record).slice(0, 200)}`;
+    const record = JSON.stringify(toWorkplaceRecord(name, args, res));
+    return res.ok ? `Done in ${res.ms ?? "?"} ms. Now call workplace_record with ${record}` : `Failed with HTTP ${res.status}: ${JSON.stringify(res.record).slice(0, 200)}. Now call workplace_record with ${record}`;
   };
 
   useFrontendTool({
@@ -62,6 +70,21 @@ export function VoiceTools({ mode, gate, onResult }: {
     parameters: z.object({ content: z.string() }),
     handler: (a) => run("tell_team", a),
   }, [gate, onResult]);
+
+  useComponent({
+    name: "workplace_record",
+    description: "Show the user the record a workplace write produced. Call it once after every note_it or tell_team, with the fields from that tool's result.",
+    parameters: z.object({
+      kind: z.enum(["doc", "message"]),
+      title: z.string().optional(),
+      id: z.string(),
+      url: z.string().optional(),
+      ms: z.number().optional(),
+      ok: z.boolean(),
+    }),
+    render: WorkplaceRecordCard,
+    followUp: false,
+  });
 
   return null;
 }

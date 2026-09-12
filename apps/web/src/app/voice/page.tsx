@@ -12,7 +12,8 @@
  * Same prompt, same three tools (Exa search, note_it → Ambiguous doc, tell_team →
  * Ambiguous channel), same tap-or-say approval sheet before any write, same
  * latency clock (end of speech → first sound). Every workplace write is shown
- * back as the record Ambiguous returned, with a link.
+ * back as the record Ambiguous returned, with a link — and on the CopilotKit
+ * stack the agent also draws its own card (generative UI, `workplace_record`).
  *
  * Built during the Agents, Everywhere hackathon (2026-09-12). Inherited from the
  * kit: the OpenAI session wiring, SYSTEM_PROMPT, and the Exa search route.
@@ -25,6 +26,7 @@ import { SYSTEM_PROMPT, searchWebParameters } from "agent-core/shared";
 import { REALTIME_MODEL } from "@/lib/realtime-config";
 import { HawkTalkRealtime, type HawkTool } from "@/lib/hawktalk-realtime";
 import { VoiceTools, type WorkplaceResult } from "@/components/voice-tools";
+import { AgentCards } from "@/components/agent-cards";
 import { TurnRecorder, transcribe, speak, unlockAudio, stopPlayback, onPlayback, chime } from "@/lib/hawk-rest";
 import { WakeWord, Endpointer, wakeWordSupported } from "@/lib/wake-word";
 import "./voice.css";
@@ -382,6 +384,8 @@ export default function VoicePage() {
           ); })}
         </section>
       )}
+
+      {provider === "copilot" && <AgentCards names={["workplace_record"]} title="Agent-drawn cards · generative UI" />}
 
       {provider === "copilot" && <VoiceTools mode="HawkTalk ears + CopilotKit agent" gate={gate} onResult={addResult} />}
 
