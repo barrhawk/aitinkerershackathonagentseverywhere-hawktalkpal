@@ -104,7 +104,7 @@ export default function VoicePage() {
   const [online, setOnline] = useState(true);
   const [tick, setTick] = useState<number>();
   const [wakeOn, setWakeOn] = useState(false);
-  const [liveAudio, setLiveAudio] = useState(false);   // HawkTalk: stream mic audio in (in-socket STT) instead of uploading a WAV first
+  const [liveAudio, setLiveAudio] = useState(true);   // HawkTalk: stream mic audio in (in-socket STT) instead of uploading a WAV first
   const [wakePhrase, setWakePhrase] = useState("hey hawk");
   const [wakeState, setWakeState] = useState<string>();
 
@@ -254,6 +254,11 @@ export default function VoicePage() {
       note: (msg) => { setLines((l) => [...l, `agent  ⚠ ${msg}`]); setThinking(undefined); releaseAt.current = 0; },
       awaitingAnswer: () => pendingRef.current.length > 0,
       reset: () => { setTimeout(() => { void reconnectRef.current(); }, 0); },
+      turn: (phase) => {
+        if (phase === "start") { stopPlayback(); setHolding(true); vibe(10); }
+        else if (phase === "cancel") setHolding(false);
+        else { setHolding(false); openTurn("hawktalk"); releaseAt.current = performance.now(); setThinking("thinking…"); }
+      },
       transcript: (role, text, final) => {
         if (final) { setLive(undefined); setLines((l) => [...l, `${role === "user" ? "you" : "agent"}  ${text}`]); relay(role === "user" ? "transcript" : "reply", { provider: "hawktalk", role: role === "user" ? "user" : "agent", text }); if (role === "user") { const used = spokenDecision(text); lastUserText.current = text; return used; } }
         else setLive({ role, text });
@@ -262,10 +267,10 @@ export default function VoicePage() {
       latency: (ms) => { if (ms.firstAudio !== undefined) { setThinking("speaking…"); pushTurn({ firstAudio: Math.round(ms.firstAudio) }); } if (ms.done !== undefined) { if (ms.done > 0) pushTurn({ done: Math.round(ms.done) }); setThinking(undefined); releaseAt.current = 0; } },
       level: (rms) => { setLevel(rms); endRef.current.level(rms); },
     }, cfg.voice, cfg.apiUrl ?? "");
-    hawk.sttFirst = !liveAudio;
+    hawk.sttFirst = !liveAudio; hawk.handsFree = liveAudio; hawk.vadOn = !wakeOnRef.current;
     try { await hawk.connect(); } catch (e) { hawk.close(); throw e; }
     hawkRef.current = hawk;
-  }, [pushTurn, runWorkplace, spokenDecision, liveAudio]);
+  }, [pushTurn, runWorkplace, spokenDecision, liveAudio, openTurn]);
 
   // ── HawkTalk ears + CopilotKit agent ────────────────────────────────────
   const connectCopilot = useCallback(async () => {
@@ -364,6 +369,7 @@ export default function VoicePage() {
     try { if (provider === "openai") await connectOpenAI(); else if (provider === "copilot") await connectCopilot(); else await connectHawk(); setStatus("live"); relay("stack", { provider, status: "live" }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setStatus("error"); }
   }, [provider, connectOpenAI, connectHawk, connectCopilot, disconnect]);
+  useEffect(() => { if (hawkRef.current) hawkRef.current.vadOn = !wakeOn; }, [wakeOn]);
   const reconnectRef = useRef<() => Promise<void>>(async () => {});
   useEffect(() => { reconnectRef.current = () => connect(true); }, [connect]);
   useEffect(() => () => disconnect(), [disconnect]);
@@ -422,8 +428,9 @@ export default function VoicePage() {
   const avg = (p: Provider, k: "firstAudio" | "done") => { const v = turns.filter((t) => t.provider === p && t[k] !== undefined).map((t) => t[k]!); return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : undefined; };
   const last = [...turns].reverse().find((t) => t.firstAudio !== undefined);
   const hk = avg("hawktalk", "firstAudio"), oa = avg("openai", "firstAudio");
-  const orbState = status !== "live" ? "off" : holding ? "hold" : thinking?.startsWith("speak") ? "speaking" : thinking ? "thinking" : provider === "openai" ? "open" : "idle";
-  const orbLabel = !online ? "offline" : status !== "live" ? "start first" : provider === "openai" ? (wakeOn && wakeState?.startsWith("listening for") ? "say the wake word" : "listening") : holding ? "release to send" : thinking ? `${thinking}${tick !== undefined ? ` ${tick} ms` : ""}` : wakeOn ? "hold or say it" : "hold to talk";
+  const handsFree = provider === "hawktalk" && liveAudio && !wakeOn;
+  const orbState = status !== "live" ? "off" : holding ? "hold" : thinking?.startsWith("speak") ? "speaking" : thinking ? "thinking" : provider === "openai" || handsFree ? "open" : "idle";
+  const orbLabel = !online ? "offline" : status !== "live" ? "start first" : provider === "openai" ? (wakeOn && wakeState?.startsWith("listening for") ? "say the wake word" : "listening") : holding ? (handsFree ? "hearing you…" : "release to send") : thinking ? `${thinking}${tick !== undefined ? ` ${tick} ms` : ""}` : handsFree ? "listening — just talk" : wakeOn ? "hold or say it" : "hold to talk";
   const recordOf = (rec: unknown) => (rec && typeof rec === "object" ? (rec as { id?: string; title?: string; url?: string; error?: string }) : undefined);
 
   return (
@@ -450,7 +457,7 @@ export default function VoicePage() {
         {provider === "hawktalk" && (
           <button type="button" className="va-chip" aria-pressed={liveAudio} disabled={status === "live" || status === "connecting"}
             title="Stream mic audio into the HawkTalk socket (transcribed in-socket) instead of uploading it first. Applies on Start."
-            onClick={() => setLiveAudio(!liveAudio)}>⚡ Live audio</button>
+            onClick={() => setLiveAudio(!liveAudio)}>⚡ Hands-free live audio</button>
         )}
         <input className="va-input" type="text" value={wakePhrase} onChange={(e) => setWakePhrase(e.target.value)} disabled={!wakeOn} aria-label="wake phrase" />
       </div>

@@ -30,10 +30,15 @@ export type HawkEvents = {
   awaitingAnswer: () => boolean;
   /** The server kept an untranscribable audio item (it has no delete); the session must be reopened. */
   reset: () => void;
+  /** Hands-free turn boundaries detected on the mic: start, end (committing), cancel (too short to send). */
+  turn: (phase: "start" | "end" | "cancel") => void;
 };
 
 const SAMPLE_RATE = 24000;
-const DUCK = 0.08;   // ducking, never AEC: attenuate the mic while the agent speaks, never mute it
+const DUCK = 0.08;
+const FRAME = 2048;          // ~85 ms at 24 kHz: finer end-of-speech timing than 4096
+// Client VAD (the gateway has no server VAD). Raw mic RMS; ducking is applied after, so talk-over still registers.
+const VAD_START = 0.02, VAD_BARGE = 0.09, VAD_END = 0.012, VAD_HANG_MS = 700, VAD_MAX_MS = 15000, VAD_MIN_VOICED_MS = 350, VAD_START_FRAMES = 2, VAD_TAIL_MS = 450;   // ducking, never AEC: attenuate the mic while the agent speaks, never mute it
 
 function pcm16ToB64(f32: Float32Array): string {
   const out = new Int16Array(f32.length);
@@ -105,6 +110,12 @@ export class HawkTalkRealtime {
   private turnPeak = 0;              // loudest sample streamed this turn (silent-capture guard)
   private voicedFrames = 0;          // frames loud enough to be speech this turn (tap guard)
   private holdForAnswer = false;     // commit sent, response.create waits for the transcript
+  /** Open mic: detect speech start/end locally and stream turns (like OpenAI's server VAD). */
+  handsFree = false;
+  /** Gate for hands-free (off while a wake word is required). */
+  vadOn = true;
+  private manual = false;            // orb hold / wake turn in progress: VAD must not end it
+  private vadHits = 0; private silenceMs = 0; private turnMs = 0; private voicedMs = 0; private quietUntil = 0;
   private fellBack = false;          // live audio's in-socket STT failed; this turn is being redone by upload
   private poisoned = false;          // an empty audio item is in the server history; errors until reset
   private noSimpleStt = false;       // gateway refused the preflight-free STT form; use Bearer multipart
@@ -268,18 +279,20 @@ export class HawkTalkRealtime {
     if (!this.ctx || !this.mic) return;
     const src = this.ctx.createMediaStreamSource(this.mic);
     // ScriptProcessor is deprecated but works everywhere without a worklet file.
-    const node = this.ctx.createScriptProcessor(4096, 1, 1);
+    const node = this.ctx.createScriptProcessor(FRAME, 1, 1);
     node.onaudioprocess = (ev) => {
       const input = ev.inputBuffer.getChannelData(0);
       let sum = 0; for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
-      this.on.level?.(Math.sqrt(sum / input.length));   // raw level: talkover still registers while ducked
+      const rms = Math.sqrt(sum / input.length);
+      this.on.level?.(rms);   // raw level: talkover still registers while ducked
+      if (this.handsFree && this.vadOn && !this.manual && this.ws && !this.sttFirst) this.vad(rms, (input.length / this.hwRate) * 1000);
       let frame = input;
       if (this.ducked) { frame = new Float32Array(input.length); for (let i = 0; i < input.length; i++) frame[i] = input[i] * DUCK; }
       const b64 = pcm16ToB64(resample(frame, this.hwRate, SAMPLE_RATE));
-      if (!this.talking) { this.preroll.push(b64); while (this.preroll.length > Math.ceil(1.2 * this.hwRate / 4096)) this.preroll.shift(); return; }
+      if (!this.talking) { this.preroll.push(b64); while (this.preroll.length > Math.ceil(1.2 * this.hwRate / FRAME)) this.preroll.shift(); return; }
       if (this.sttFirst) { this.turnFrames.push(b64ToBytes(b64)); return; }
       for (let i = 0; i < input.length; i += 8) { const a = Math.abs(input[i]) * 32767; if (a > this.turnPeak) this.turnPeak = a; }
-      if (Math.sqrt(sum / input.length) > 0.01) this.voicedFrames++;
+      if (rms > 0.01) { this.voicedFrames++; this.voicedMs += (input.length / this.hwRate) * 1000; }
       this.turnFrames.push(b64ToBytes(b64));   // kept only as the upload fallback if in-socket STT fails
       this.send({ type: "input_audio_buffer.append", audio: b64 });
     };
@@ -288,14 +301,35 @@ export class HawkTalkRealtime {
     this.micNode = node;
   }
 
+  private vad(rms: number, frameMs: number) {
+    const now = performance.now();
+    if (this.ducked) this.quietUntil = now + VAD_TAIL_MS;           // speaker bleed + room tail after the agent stops
+    if (!this.talking) {
+      const th = this.ducked || now < this.quietUntil ? VAD_BARGE : VAD_START;
+      if (rms > th) { if (++this.vadHits >= VAD_START_FRAMES) { this.vadHits = 0; this.pressToTalk(true, false); this.turnMs = 0; this.silenceMs = 0; this.on.turn?.("start"); } }
+      else this.vadHits = 0;
+      return;
+    }
+    this.turnMs += frameMs;
+    this.silenceMs = rms < VAD_END ? this.silenceMs + frameMs : 0;
+    if (this.silenceMs < VAD_HANG_MS && this.turnMs < VAD_MAX_MS) return;
+    if (this.voicedMs < VAD_MIN_VOICED_MS) {                        // a blip, not speech: drop it quietly
+      this.talking = false; this.send({ type: "input_audio_buffer.clear" }); this.turnFrames = [];
+      this.on.turn?.("cancel"); return;
+    }
+    this.on.turn?.("end");
+    this.release();
+  }
+
   /** Hold-to-talk: press opens the turn, release commits it. With `withPreroll` the last second of audio is sent first (wake word). */
-  pressToTalk(withPreroll = false) {
+  pressToTalk(withPreroll = false, manual = true) {
     if (!this.ws) return;
+    this.manual = manual;
     void this.ctx?.resume();
     this.stopPlayback();
     if (this.responding) { this.send({ type: "response.cancel" }); this.responding = false; }
     this.send({ type: "input_audio_buffer.clear" });
-    this.turnFrames = []; this.turnPeak = 0; this.voicedFrames = 0; this.holdForAnswer = false;
+    this.turnFrames = []; this.turnPeak = 0; this.voicedFrames = 0; this.voicedMs = 0; this.holdForAnswer = false;
     if (withPreroll) for (const b64 of this.preroll) { this.turnFrames.push(b64ToBytes(b64)); if (!this.sttFirst) this.send({ type: "input_audio_buffer.append", audio: b64 }); }
     this.preroll = [];
     this.talking = true;
@@ -303,7 +337,7 @@ export class HawkTalkRealtime {
   }
   release() {
     if (!this.talking) return;
-    this.talking = false;
+    this.talking = false; this.manual = false;
     this.tCommit = performance.now();
     if (this.sttFirst) { void this.sttThenSend(); return; }
     const peak = Math.round(this.turnPeak);
