@@ -6,6 +6,9 @@
  *   OpenAI Realtime  — the kit's WebRTC session (gpt-realtime), server VAD.
  *   HawkTalk         — a plain WebSocket to wss://hawktalk.ai/v1/realtime,
  *                      hold-to-talk, speech runs on HawkTalk's own silicon.
+ *   HawkTalk + CopilotKit — HawkTalk is the ears and mouth (REST STT/TTS), the
+ *                      kit's CopilotKit agent is the brain, and its approval
+ *                      cards and results render as CopilotKit generative UI.
  *
  * Same prompt, same three tools, same approval gate, same transcript. The
  * page clocks each turn (end of speech → first audio → done) so the two can be
@@ -21,8 +24,11 @@ import { z } from "zod";
 import { SYSTEM_PROMPT, searchWebParameters } from "agent-core/shared";
 import { REALTIME_MODEL } from "@/lib/realtime-config";
 import { HawkTalkRealtime, type HawkTool } from "@/lib/hawktalk-realtime";
+import { CopilotChat, useAgent } from "@copilotkit/react-core/v2";
+import { VoiceTools } from "@/components/voice-tools";
+import { TurnRecorder, transcribe, speak } from "@/lib/hawk-rest";
 
-type Provider = "openai" | "hawktalk";
+type Provider = "openai" | "hawktalk" | "copilot";
 type Status = "idle" | "connecting" | "live" | "error";
 type Turn = { provider: Provider; firstAudio?: number; done?: number; at: string };
 type Pending = { name: string; args: Record<string, unknown>; resolve: (ok: boolean) => void };
@@ -68,6 +74,9 @@ export default function VoicePage() {
 
   const oaRef = useRef<RealtimeSession | null>(null);
   const hawkRef = useRef<HawkTalkRealtime | null>(null);
+  const recRef = useRef<TurnRecorder | null>(null);
+  const { agent } = useAgent({ agentId: "default" });
+  const [thinking, setThinking] = useState<string>();
   const clock = useRef<{ t0: number; got: boolean }>({ t0: 0, got: false });
   const turnRef = useRef<Turn | undefined>(undefined);
 
@@ -148,21 +157,57 @@ export default function VoicePage() {
     hawkRef.current = hawk;
   }, [pushTurn, runWorkplace]);
 
+  // ── HawkTalk ears + CopilotKit agent ─────────────────────────────────────
+  const connectCopilot = useCallback(async () => {
+    const rec = new TurnRecorder(); await rec.open(); recRef.current = rec;
+  }, []);
+  const copilotTurn = useCallback(async (wav: Blob) => {
+    const tRelease = performance.now();
+    setThinking("transcribing…");
+    const heard = await transcribe(wav);
+    if (!heard.text) { setThinking(undefined); return; }
+    setLines((l) => [...l, `you  ${heard.text}`]);
+    setThinking("thinking…");
+    let reply = "";
+    const sub = { onTextMessageContentEvent: ({ event }: { event: { delta?: string } }) => { reply += event.delta ?? ""; } };
+    agent.addMessage({ id: crypto.randomUUID(), role: "user", content: heard.text });
+    await agent.runAgent({}, sub as never);
+    if (!reply) {
+      const last = [...agent.messages].reverse().find((m) => m.role === "assistant" && typeof (m as { content?: unknown }).content === "string");
+      reply = last ? String((last as { content?: string }).content) : "";
+    }
+    setLines((l) => [...l, `agent  ${reply}`]);
+    setThinking("speaking…");
+    if (reply) {
+      const started = await speak(reply);
+      pushTurn({ firstAudio: Math.round(started - tRelease), done: Math.round(started - tRelease) });
+    }
+    setThinking(undefined);
+  }, [agent, pushTurn]);
+
   const connect = useCallback(async () => {
     setStatus("connecting"); setError(undefined); setLines([]); setLive(undefined);
-    try { if (provider === "openai") await connectOpenAI(); else await connectHawk(); setStatus("live"); }
+    try { if (provider === "openai") await connectOpenAI(); else if (provider === "copilot") await connectCopilot(); else await connectHawk(); setStatus("live"); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setStatus("error"); }
-  }, [provider, connectOpenAI, connectHawk]);
+  }, [provider, connectOpenAI, connectHawk, connectCopilot]);
 
   const disconnect = useCallback(() => {
     oaRef.current?.close(); oaRef.current = null;
     hawkRef.current?.close(); hawkRef.current = null;
-    setStatus("idle"); setHolding(false);
+    recRef.current?.close(); recRef.current = null;
+    setStatus("idle"); setHolding(false); setThinking(undefined);
   }, []);
   useEffect(() => () => disconnect(), [disconnect]);
 
-  const holdStart = () => { if (!hawkRef.current) return; setHolding(true); hawkRef.current.pressToTalk(); };
-  const holdEnd = () => { if (!hawkRef.current || !holding) return; setHolding(false); openTurn("hawktalk"); hawkRef.current.release(); };
+  const holdStart = () => {
+    if (recRef.current) { setHolding(true); recRef.current.start(); return; }
+    if (!hawkRef.current) return; setHolding(true); hawkRef.current.pressToTalk();
+  };
+  const holdEnd = () => {
+    if (!holding) return; setHolding(false);
+    if (recRef.current) { openTurn("copilot"); const wav = recRef.current.stop(); copilotTurn(wav).catch((e) => { setError(e instanceof Error ? e.message : String(e)); setThinking(undefined); }); return; }
+    if (!hawkRef.current) return; openTurn("hawktalk"); hawkRef.current.release();
+  };
 
   const avg = (p: Provider, k: "firstAudio" | "done") => { const v = turns.filter((t) => t.provider === p && t[k] !== undefined).map((t) => t[k]!); return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : undefined; };
 
@@ -178,7 +223,8 @@ export default function VoicePage() {
 
       <fieldset style={{ marginTop: "1.5rem", border: 0, padding: 0 }} disabled={status === "live" || status === "connecting"}>
         <label style={{ marginRight: "1.5rem" }}><input type="radio" name="p" checked={provider === "hawktalk"} onChange={() => setProvider("hawktalk")} /> HawkTalk</label>
-        <label><input type="radio" name="p" checked={provider === "openai"} onChange={() => setProvider("openai")} /> OpenAI Realtime</label>
+        <label style={{ marginRight: "1.5rem" }}><input type="radio" name="p" checked={provider === "openai"} onChange={() => setProvider("openai")} /> OpenAI Realtime</label>
+        <label><input type="radio" name="p" checked={provider === "copilot"} onChange={() => setProvider("copilot")} /> HawkTalk ears + CopilotKit agent</label>
       </fieldset>
 
       <div className="ck-actions" style={{ marginTop: "1rem" }}>
@@ -186,17 +232,17 @@ export default function VoicePage() {
           <button type="button" className="ck-btn" onClick={disconnect}>End</button>
         ) : (
           <button type="button" className="ck-btn ck-btn--primary" onClick={connect} disabled={status === "connecting"}>
-            {status === "connecting" ? "Connecting…" : `Start on ${provider === "openai" ? "OpenAI" : "HawkTalk"}`}
+            {status === "connecting" ? "Connecting…" : `Start on ${provider === "openai" ? "OpenAI" : provider === "copilot" ? "HawkTalk + CopilotKit" : "HawkTalk"}`}
           </button>
         )}
         <span className="ck-status" data-status={status}>{status}</span>
       </div>
 
-      {status === "live" && provider === "hawktalk" && (
+      {status === "live" && (provider === "hawktalk" || provider === "copilot") && (
         <button type="button" className="ck-btn ck-btn--primary"
           style={{ marginTop: "1rem", width: "100%", padding: "1.4rem", fontSize: "1.1rem", background: holding ? "#0a7" : undefined, touchAction: "none" }}
           onPointerDown={holdStart} onPointerUp={holdEnd} onPointerCancel={holdEnd} onPointerLeave={holdEnd}>
-          {holding ? `Listening… ${"▮".repeat(Math.min(12, Math.round(level * 60)))}` : "Hold to talk"}
+          {holding ? `Listening… ${"▮".repeat(Math.min(12, Math.round(level * 60)))}` : thinking ?? "Hold to talk"}
         </button>
       )}
       {status === "live" && provider === "openai" && (
@@ -221,6 +267,14 @@ export default function VoicePage() {
         </article>
       )}
 
+      {provider === "copilot" && (
+        <section className="ck-panel ck-assistant" style={{ marginTop: "1.5rem" }}>
+          <header className="ck-assistant-header"><h2>CopilotKit agent</h2><p>Your words go in as a message; approvals and results render here.</p></header>
+          <VoiceTools mode="HawkTalk ears + CopilotKit agent" />
+          <CopilotChat className="ck-chat" agentId="default" labels={{ welcomeMessageText: "Hold the button and talk.", chatInputPlaceholder: "…or type" }} />
+        </section>
+      )}
+
       {(lines.length > 0 || live) && (
         <section style={{ marginTop: "2rem" }}>
           <h2 style={{ fontSize: "1.05rem" }}>Transcript</h2>
@@ -240,6 +294,7 @@ export default function VoicePage() {
                 ))}
                 <tr><td colSpan={2}><strong>avg HawkTalk</strong></td><td>{avg("hawktalk", "firstAudio") ?? "–"} ms</td><td>{avg("hawktalk", "done") ?? "–"} ms</td></tr>
                 <tr><td colSpan={2}><strong>avg OpenAI</strong></td><td>{avg("openai", "firstAudio") ?? "–"} ms</td><td>{avg("openai", "done") ?? "–"} ms</td></tr>
+                <tr><td colSpan={2}><strong>avg HawkTalk + CopilotKit</strong></td><td>{avg("copilot", "firstAudio") ?? "–"} ms</td><td>{avg("copilot", "done") ?? "–"} ms</td></tr>
               </tbody>
             </table>
           </div>
