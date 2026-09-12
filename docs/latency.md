@@ -42,6 +42,7 @@ Measured from the dev box, not the phone. Phone-side numbers after these changes
 | Lever | Before | After | How measured |
 |---|---|---|---|
 | Public STT moved to the GPU speech-to-text on the voice box (was the CPU one on the gateway box) | 1,390–1,520 ms | 130–155 ms | Same 1.8 s utterance, 16 kHz and 24 kHz WAV, Bearer multipart and the browser's raw-WAV path, curl against the public API from a laptop, 2026-09-12. The app's server STT route went to 350–400 ms end to end; the integration suite still passes 11/11. |
+| CopilotKit agent model: gpt-5.6-sol → gpt-5.4-mini (`MODEL`) | 0.71–2.11 s to first token; ~3.4 s agent run in the dev log | 0.46–0.79 s to first token; 0.83–1.24 s first token and 1.12–1.52 s complete through the CopilotKit runtime | OpenAI Responses API streamed, a chat turn and a tool turn per model, 2–3 runs each; then three warm runs through `/api/copilotkit/agent/default/run`, 2026-09-12. Tool calls still fire (`search_web` in 1.07 s). |
 
 Expected effect on the HawkTalk realtime stack: release → first audio from ~2.1 s to under 1 s. Not yet timed on the phone.
 

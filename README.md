@@ -93,7 +93,7 @@ OPENAI_API_KEY=            # needs Realtime access
 EXA_API_KEY=
 EXA_SEARCH_TYPE=fast
 MODEL_PROVIDER=openai      # third stack's reasoning model (openai | openrouter)
-MODEL=gpt-5.6-sol
+MODEL=gpt-5.4-mini           # fastest measured for voice: ~0.5 s to first token vs 0.7–2.1 s for gpt-5.6-sol
 OPENROUTER_API_KEY=        # only if MODEL_PROVIDER=openrouter
 
 # HawkTalk stacks (account-dependent)
