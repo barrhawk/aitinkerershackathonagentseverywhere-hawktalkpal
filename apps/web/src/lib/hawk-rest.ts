@@ -61,11 +61,35 @@ export class TurnRecorder {
   close() { this.node?.disconnect(); this.mic?.getTracks().forEach((t) => t.stop()); void this.ctx?.close(); }
 }
 
-export async function transcribe(wav: Blob): Promise<{ text: string; ms?: number }> {
+/** Where the browser can reach HawkTalk itself (from /api/hawktalk-config). Set = skip the Next hop. */
+export type HawkDirect = { apiUrl: string; key: string };
+
+export async function transcribe(wav: Blob, direct?: HawkDirect): Promise<{ text: string; ms?: number }> {
+  if (direct?.apiUrl && direct.key) {
+    // Straight to HawkTalk (CORS is open), like the realtime stack; any failure falls back to the proxy.
+    try {
+      const t0 = performance.now();
+      const form = new FormData(); form.append("file", wav, "turn.wav"); form.append("model", "hawk-ear");
+      const r = await fetch(`${direct.apiUrl}/v1/audio/transcriptions`, { method: "POST", headers: { Authorization: `Bearer ${direct.key}` }, body: form });
+      if (r.ok) {
+        const raw = await r.text(); let text = raw;
+        try { const j = JSON.parse(raw) as { text?: string }; if (typeof j.text === "string") text = j.text; } catch { /* plain text */ }
+        return { text: text.trim(), ms: Math.round(performance.now() - t0) };
+      }
+    } catch { /* network / CORS: use the proxy */ }
+  }
   const r = await fetch("/api/hawk/stt", { method: "POST", headers: { "Content-Type": "audio/wav" }, body: wav });
   const d = (await r.json()) as { text?: string; ms?: number; error?: string };
   if (!r.ok || typeof d.text !== "string") throw new Error(d.error ?? `STT failed (${r.status})`);
   return { text: d.text, ms: d.ms };
+}
+
+/** Open the TLS connection to HawkTalk before the first turn needs it. */
+export function preconnect(origin: string) {
+  try {
+    const u = new URL(origin).origin;
+    if (!document.querySelector(`link[rel="preconnect"][href="${u}"]`)) { const l = document.createElement("link"); l.rel = "preconnect"; l.href = u; l.crossOrigin = "anonymous"; document.head.appendChild(l); }
+  } catch { /* bad url */ }
 }
 
 let player: HTMLAudioElement | undefined;
@@ -83,8 +107,14 @@ export function unlockAudio() {
   player.muted = false;
 }
 
+let epoch = 0;                              // bumped by barge-in: queued sentences from an older turn never play
+let abortPlay: (() => void) | undefined;   // settles the in-flight play so a queue never hangs on a stopped clip
+let playGen = 0;
+
 /** Barge-in: stop whatever is playing without leaving a rejected play() behind. */
 export function stopPlayback() {
+  epoch++;
+  const ab = abortPlay; abortPlay = undefined; ab?.();
   if (!player) return;
   player.onplaying = null; player.onended = null; player.onerror = null;
   try { player.pause(); player.currentTime = 0; } catch { /* nothing loaded */ }
@@ -92,19 +122,57 @@ export function stopPlayback() {
   emit(false);
 }
 
-/** Render and play; resolves with the time the audio actually started. */
-export async function speak(text: string): Promise<number> {
+async function fetchTts(text: string): Promise<Blob> {
   const r = await fetch("/api/hawk/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
   if (!r.ok) { const d = (await r.json().catch(() => ({}))) as { error?: string }; throw new Error(d.error ?? `TTS failed (${r.status})`); }
-  const url = URL.createObjectURL(await r.blob());
+  return r.blob();
+}
+
+/** Play one clip on the shared (gesture-unlocked) player. `started` fires on first sound; resolves when it ends or is stopped. */
+function playBlob(blob: Blob, started: (t: number) => void): Promise<void> {
+  const url = URL.createObjectURL(blob);
   const a = player ?? (player = new Audio());
+  const gen = ++playGen;
   a.src = url;
-  return new Promise<number>((resolve, reject) => {
-    a.onplaying = () => { emit(true); resolve(performance.now()); };
-    a.onerror = () => { emit(false); reject(new Error("audio playback failed")); };
-    a.onended = () => { URL.revokeObjectURL(url); setTimeout(() => emit(false), 150); };   // restore on the tail, not the last sample
-    a.play().catch((e: unknown) => { emit(false); reject(e instanceof Error ? e : new Error(String(e))); });
+  return new Promise<void>((resolve, reject) => {
+    const done = () => { abortPlay = undefined; URL.revokeObjectURL(url); resolve(); };
+    abortPlay = done;
+    a.onplaying = () => { emit(true); started(performance.now()); };
+    a.onerror = () => { abortPlay = undefined; emit(false); URL.revokeObjectURL(url); reject(new Error("audio playback failed")); };
+    a.onended = () => { setTimeout(() => { if (gen === playGen) emit(false); }, 150); done(); };   // restore on the tail, not the last sample; a queued next clip keeps the duck
+    a.play().catch((e: unknown) => { abortPlay = undefined; emit(false); URL.revokeObjectURL(url); reject(e instanceof Error ? e : new Error(String(e))); });
   });
+}
+
+/** Render and play; resolves with the time the audio actually started. */
+export async function speak(text: string): Promise<number> {
+  const blob = await fetchTts(text);
+  return new Promise<number>((resolve, reject) => { playBlob(blob, resolve).catch(reject); });
+}
+
+/**
+ * Sentence queue for a streamed reply: every sentence is rendered as soon as it is
+ * handed over (requests run in parallel), but clips play strictly in order on the
+ * shared player. A barge-in (stopPlayback) drops everything still queued.
+ */
+export function createSpeechQueue(onFirstSound: (t: number) => void, onError: (e: unknown) => void) {
+  const myEpoch = epoch; let chain: Promise<void> = Promise.resolve(); let first = true; let count = 0;
+  return {
+    get count() { return count; },
+    say(text: string) {
+      const t = text.trim(); if (!t) return;
+      count++;
+      const clip = fetchTts(t); clip.catch(() => undefined);
+      chain = chain.then(async () => {
+        if (epoch !== myEpoch) return;
+        const blob = await clip;
+        if (epoch !== myEpoch) return;
+        await playBlob(blob, (at) => { if (first) { first = false; onFirstSound(at); } });
+      }).catch((e) => { if (epoch === myEpoch) onError(e); });
+    },
+    /** Resolves when every queued sentence has played (or been dropped). */
+    drain() { return chain; },
+  };
 }
 
 /** Short two-tone earcon for the wake word (works without a gesture once audio is unlocked). */
