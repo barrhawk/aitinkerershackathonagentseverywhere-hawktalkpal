@@ -225,7 +225,7 @@ export default function VoicePage() {
   // ── HawkTalk realtime ───────────────────────────────────────────────────
   const connectHawk = useCallback(async () => {
     const r = await fetch("/api/hawktalk-config", { method: "POST" });
-    const cfg = (await r.json()) as { endpoint?: string; key?: string; voice?: string; error?: string };
+    const cfg = (await r.json()) as { endpoint?: string; key?: string; voice?: string; apiUrl?: string; error?: string };
     if (!r.ok || !cfg.key || !cfg.endpoint) throw new Error(cfg.error ?? "No HawkTalk config.");
     const tools: HawkTool[] = [
       { name: "search_web", description: "Search the live web for anything time-sensitive or factual.", parameters: { type: "object", properties: { query: { type: "string" }, results: { type: "number" } }, required: ["query"] }, execute: async (a) => search(String(a.query ?? ""), typeof a.results === "number" ? a.results : undefined) },
@@ -241,7 +241,7 @@ export default function VoicePage() {
       },
       latency: (ms) => { if (ms.firstAudio !== undefined) { setThinking("speaking…"); pushTurn({ firstAudio: Math.round(ms.firstAudio) }); } if (ms.done !== undefined) { if (ms.done > 0) pushTurn({ done: Math.round(ms.done) }); setThinking(undefined); releaseAt.current = 0; } },
       level: (rms) => { setLevel(rms); endRef.current.level(rms); },
-    }, cfg.voice);
+    }, cfg.voice, cfg.apiUrl ?? "");
     try { await hawk.connect(); } catch (e) { hawk.close(); throw e; }
     hawkRef.current = hawk;
   }, [pushTurn, runWorkplace, spokenDecision]);

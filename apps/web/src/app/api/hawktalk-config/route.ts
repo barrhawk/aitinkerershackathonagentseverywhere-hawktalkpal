@@ -14,6 +14,7 @@ export async function POST(request: Request) {
   if (!key) return Response.json({ error: "HAWKTALK_API_KEY is not set on the server." }, { status: 500 });
   return Response.json({
     endpoint: process.env.HAWKTALK_REALTIME_URL ?? "wss://hawktalk.ai/v1/realtime",
+    apiUrl: process.env.HAWKTALK_API_URL ?? "https://api.hawktalk.ai",
     key,
     voice: process.env.HAWKTALK_VOICE ?? "",
   });

@@ -106,6 +106,7 @@ export class HawkTalkRealtime {
     private tools: HawkTool[],
     private on: Partial<HawkEvents>,
     private voice = "",
+    private apiUrl = "",
   ) {}
 
   async connect(): Promise<void> {
@@ -260,8 +261,17 @@ export class HawkTalkRealtime {
     const frames = this.turnFrames; this.turnFrames = [];
     if (!frames.length) { this.on.note?.("nothing captured"); this.on.latency?.({ done: 0 }); return; }
     try {
-      const r = await fetch("/api/hawk/stt", { method: "POST", headers: { "Content-Type": "audio/wav" }, body: wavFromPcm16(frames, SAMPLE_RATE) });
-      const d = (await r.json()) as { text?: string; error?: string };
+      const wav = wavFromPcm16(frames, SAMPLE_RATE);
+      let r: Response; let d: { text?: string; error?: string };
+      if (this.apiUrl) {
+        // Direct to HawkTalk with the session key: skips the relay through the dev server.
+        const form = new FormData(); form.append("file", wav, "turn.wav");
+        r = await fetch(`${this.apiUrl}/v1/audio/transcriptions`, { method: "POST", headers: { Authorization: `Bearer ${this.key}` }, body: form });
+        const raw = await r.text(); try { d = JSON.parse(raw) as { text?: string }; } catch { d = { text: raw }; }
+      } else {
+        r = await fetch("/api/hawk/stt", { method: "POST", headers: { "Content-Type": "audio/wav" }, body: wav });
+        d = (await r.json()) as { text?: string; error?: string };
+      }
       const text = (d.text ?? "").trim();
       if (!r.ok || !text) { this.on.note?.(d.error ? `transcription: ${d.error}` : "didn't catch that"); this.on.latency?.({ done: 0 }); return; }
       this.on.transcript?.("user", text, true);
