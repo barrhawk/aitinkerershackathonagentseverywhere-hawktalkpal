@@ -98,6 +98,8 @@ export class HawkTalkRealtime {
   /** Transcribe locally-captured audio via /api/hawk/stt and send input_text; the gateway's
    *  realtime path has no ASR while the voice card serves it. */
   sttFirst = true;
+  private noSimpleStt = false;       // gateway refused the preflight-free STT form; use Bearer multipart
+  private lastWarm = 0;
 
   constructor(
     private endpoint: string,
@@ -138,6 +140,18 @@ export class HawkTalkRealtime {
     });
   }
 
+  private sttSimpleUrl() { return `${this.apiUrl}/v1/audio/transcriptions?api_key=${encodeURIComponent(this.key)}`; }
+  /** Open (or keep open) the TLS connection to the STT origin before the turn is released, so the
+   *  upload does not pay a handshake (and, on the Bearer fallback, seeds the preflight cache). Cheap 404. */
+  private warmStt() {
+    if (!this.sttFirst || !this.apiUrl) return;
+    const now = performance.now(); if (now - this.lastWarm < 3000) return; this.lastWarm = now;
+    const req = this.noSimpleStt
+      ? fetch(`${this.apiUrl}/v1/audio/transcriptions`, { method: "GET", headers: { Authorization: `Bearer ${this.key}` } })
+      : fetch(this.sttSimpleUrl(), { method: "GET" });
+    void req.then((r) => r.body?.cancel()).catch(() => undefined);
+  }
+
   private send(o: unknown) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(o));
   }
@@ -162,6 +176,7 @@ export class HawkTalkRealtime {
         break;
       case "session.updated":
         this.startMic();
+        this.warmStt();
         this.on.status?.("live");
         break;
       case "conversation.item.input_audio_transcription.delta":
@@ -248,6 +263,7 @@ export class HawkTalkRealtime {
     if (withPreroll) for (const b64 of this.preroll) { if (this.sttFirst) this.turnFrames.push(b64ToBytes(b64)); else this.send({ type: "input_audio_buffer.append", audio: b64 }); }
     this.preroll = [];
     this.talking = true;
+    this.warmStt();
   }
   release() {
     if (!this.talking) return;
@@ -268,8 +284,20 @@ export class HawkTalkRealtime {
       let r: Response; let d: { text?: string; error?: string };
       if (this.apiUrl) {
         // Direct to HawkTalk with the session key: skips the relay through the dev server.
-        const form = new FormData(); form.append("file", wav, "turn.wav");
-        r = await fetch(`${this.apiUrl}/v1/audio/transcriptions`, { method: "POST", headers: { Authorization: `Bearer ${this.key}` }, body: form });
+        // Fast path: raw body + key in the query is a CORS "simple" request, so the browser skips
+        // the OPTIONS preflight it would otherwise send before every turn. Bearer multipart is the fallback.
+        let fast: Response | undefined;
+        if (!this.noSimpleStt) {
+          try {
+            fast = await fetch(this.sttSimpleUrl(), { method: "POST", body: new Blob([wav]) });
+            if (fast.status === 401 || fast.status === 403 || fast.status === 404 || fast.status === 415) { this.noSimpleStt = true; fast = undefined; }
+          } catch { this.noSimpleStt = true; fast = undefined; }
+        }
+        if (fast) r = fast;
+        else {
+          const form = new FormData(); form.append("file", wav, "turn.wav");
+          r = await fetch(`${this.apiUrl}/v1/audio/transcriptions`, { method: "POST", headers: { Authorization: `Bearer ${this.key}` }, body: form });
+        }
         const raw = await r.text(); try { d = JSON.parse(raw) as { text?: string }; } catch { d = { text: raw }; }
       } else {
         r = await fetch("/api/hawk/stt", { method: "POST", headers: { "Content-Type": "audio/wav" }, body: wav });
