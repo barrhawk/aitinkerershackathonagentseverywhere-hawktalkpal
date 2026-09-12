@@ -270,6 +270,10 @@ export default function VoicePage() {
   }, [agent, pushTurn]);
   const copilotTurn = useCallback(async (wav: Blob) => {
     releaseAt.current = performance.now(); setThinking("transcribing…");
+    // Silent capture = the mic is muted, wrong, or owned by another app. Say so; don't transcribe silence.
+    const pcm = new Int16Array(await wav.arrayBuffer(), 44); let peak = 0;
+    for (let i = 0; i < pcm.length; i += 4) { const a = Math.abs(pcm[i]); if (a > peak) peak = a; }
+    if (peak < 200) { setLines((l) => [...l, `agent  ⚠ mic captured silence (peak ${peak}/32767) — check the input device / mute, or another app holds the mic`]); setThinking(undefined); releaseAt.current = 0; return; }
     const heard = await transcribe(wav);
     if (!heard.text) { setThinking(undefined); releaseAt.current = 0; return; }
     setLines((l) => [...l, `you  ${heard.text}`]); relay("transcript", { provider: "copilot", role: "user", text: heard.text });
