@@ -1,40 +1,32 @@
 "use client";
 
 /**
- * The voice agent's tools, registered into the CopilotKit agent so its
- * approval cards and results render as CopilotKit generative UI in the chat.
- * Same three tools as the realtime providers; same server routes behind them.
+ * The voice agent's tools, registered on the CopilotKit agent for the
+ * "HawkTalk ears + CopilotKit agent" mode. Same three tools as the realtime
+ * providers, and the same page-level approval sheet and result cards: the page
+ * hands in `gate` and `onResult`, so nothing here renders on its own.
  */
-import { useAgentContext, useFrontendTool, useHumanInTheLoop } from "@copilotkit/react-core/v2";
+import { useAgentContext, useFrontendTool } from "@copilotkit/react-core/v2";
 import { z } from "zod";
 
-async function workplace(action: string, body: Record<string, unknown>) {
+export type WorkplaceResult = { ok: boolean; status: number; ms?: number; record: unknown };
+
+async function workplace(action: string, body: Record<string, unknown>): Promise<WorkplaceResult> {
   const r = await fetch("/api/workplace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, ...body }) });
   const d = (await r.json()) as { ok?: boolean; status?: number; data?: unknown; ms?: number; error?: string };
-  const ok = r.ok && d.ok !== false;
-  return ok ? `Done in ${d.ms ?? "?"} ms. Record: ${JSON.stringify(d.data).slice(0, 400)}` : `Failed with HTTP ${d.status ?? r.status}: ${JSON.stringify(d.data ?? d.error).slice(0, 200)}`;
+  return { ok: r.ok && d.ok !== false, status: d.status ?? r.status, ms: d.ms, record: d.data ?? d.error };
 }
 
-function Gate({ title, detail, respond, result, action }: { title: string; detail: string; respond?: (s: string) => void; result?: unknown; action: () => Promise<string> }) {
-  if (!respond) return <article className="ck-card ck-card--gate"><p className="ck-gate-done">{result ? String(result) : "Waiting…"}</p></article>;
-  return (
-    <article className="ck-card ck-card--gate">
-      <h3>{title}</h3>
-      <pre className="ck-transcript">{detail}</pre>
-      <div className="ck-actions">
-        <button type="button" className="ck-btn ck-btn--primary" onClick={async () => respond(await action())}>Approve</button>
-        <button type="button" className="ck-btn" onClick={() => respond("The user declined. Nothing was changed. Say so plainly.")}>Decline</button>
-      </div>
-    </article>
-  );
-}
-
-export function VoiceTools({ mode }: { mode: string }) {
+export function VoiceTools({ mode, gate, onResult }: {
+  mode: string;
+  gate: (name: string, args: Record<string, unknown>) => Promise<boolean>;
+  onResult: (name: "note_it" | "tell_team", res: WorkplaceResult | { ok: false; status: 0; record: string }) => void;
+}) {
   useAgentContext({
     description: "Voice mode for this session. The user is speaking, and your text reply is read aloud by HawkTalk.",
     value: {
       mode,
-      rules: ["Reply in one or two sentences.", "Never read out URLs, ids or code; describe them.", "Before a workplace write, say what you will file in one sentence, then call note_it or tell_team; the user approves with a tap.", "If a tool reports an error, say so; never claim success without a record."],
+      rules: ["Reply in one or two sentences.", "Never read out URLs, ids or code; describe them.", "Before a workplace write, say what you will file in one sentence, then call note_it or tell_team; the user approves with a tap or by saying yes.", "If a tool reports an error, say so; never claim success without a record.", "The user may start with a wake phrase such as 'hey hawk'; ignore it."],
     },
   });
 
@@ -49,25 +41,27 @@ export function VoiceTools({ mode }: { mode: string }) {
     },
   });
 
-  useHumanInTheLoop({
-    name: "note_it",
-    description: "Create a document in the user's Ambiguous AI workspace. The user approves with a tap before it is written.",
-    parameters: z.object({ title: z.string(), content: z.string() }),
-    render: ({ args, respond, result }) => (
-      <Gate title="Create a doc in Ambiguous?" detail={`${args.title ?? ""}\n\n${args.content ?? ""}`} respond={respond} result={result}
-        action={() => workplace("note_it", { title: args.title, content: args.content })} />
-    ),
-  });
+  const run = async (name: "note_it" | "tell_team", args: Record<string, unknown>) => {
+    const ok = await gate(name, args);
+    if (!ok) { onResult(name, { ok: false, status: 0, record: "declined by user" }); return "The user declined. Nothing was changed. Say so plainly."; }
+    const res = await workplace(name, args);
+    onResult(name, res);
+    return res.ok ? `Done in ${res.ms ?? "?"} ms. Record: ${JSON.stringify(res.record).slice(0, 400)}` : `Failed with HTTP ${res.status}: ${JSON.stringify(res.record).slice(0, 200)}`;
+  };
 
-  useHumanInTheLoop({
+  useFrontendTool({
+    name: "note_it",
+    description: "Create a document in the user's Ambiguous AI workspace. The user approves before it is written.",
+    parameters: z.object({ title: z.string(), content: z.string() }),
+    handler: (a) => run("note_it", a),
+  }, [gate, onResult]);
+
+  useFrontendTool({
     name: "tell_team",
-    description: "Post a message to the team's Ambiguous AI chat channel. The user approves with a tap before it is posted.",
+    description: "Post a message to the team's Ambiguous AI chat channel. The user approves before it is posted.",
     parameters: z.object({ content: z.string() }),
-    render: ({ args, respond, result }) => (
-      <Gate title="Post to the team channel?" detail={args.content ?? ""} respond={respond} result={result}
-        action={() => workplace("tell_team", { content: args.content })} />
-    ),
-  });
+    handler: (a) => run("tell_team", a),
+  }, [gate, onResult]);
 
   return null;
 }

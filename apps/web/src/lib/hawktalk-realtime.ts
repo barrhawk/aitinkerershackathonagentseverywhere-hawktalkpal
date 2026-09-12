@@ -27,6 +27,7 @@ export type HawkEvents = {
 };
 
 const SAMPLE_RATE = 24000;
+const DUCK = 0.08;   // ducking, never AEC: attenuate the mic while the agent speaks, never mute it
 
 function pcm16ToB64(f32: Float32Array): string {
   const out = new Int16Array(f32.length);
@@ -71,6 +72,8 @@ export class HawkTalkRealtime {
   private meBuf = "";
   private hwRate = 48000;
   private preroll: string[] = [];   // last ~1.2 s of encoded frames for wake-word turns
+  private ducked = false;
+  private unduckTimer?: ReturnType<typeof setTimeout>;
 
   constructor(
     private endpoint: string,
@@ -183,8 +186,10 @@ export class HawkTalkRealtime {
     node.onaudioprocess = (ev) => {
       const input = ev.inputBuffer.getChannelData(0);
       let sum = 0; for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
-      this.on.level?.(Math.sqrt(sum / input.length));
-      const b64 = pcm16ToB64(resample(input, this.hwRate, SAMPLE_RATE));
+      this.on.level?.(Math.sqrt(sum / input.length));   // raw level: talkover still registers while ducked
+      let frame = input;
+      if (this.ducked) { frame = new Float32Array(input.length); for (let i = 0; i < input.length; i++) frame[i] = input[i] * DUCK; }
+      const b64 = pcm16ToB64(resample(frame, this.hwRate, SAMPLE_RATE));
       if (!this.talking) { this.preroll.push(b64); while (this.preroll.length > Math.ceil(1.2 * this.hwRate / 4096)) this.preroll.shift(); return; }
       this.send({ type: "input_audio_buffer.append", audio: b64 });
     };
@@ -224,8 +229,13 @@ export class HawkTalkRealtime {
     const s = this.ctx.createBufferSource(); s.buffer = buf; s.connect(this.duck);
     const at = Math.max(this.ctx.currentTime, this.playhead);
     s.start(at); this.playhead = at + buf.duration;
+    // Duck for as long as audio is scheduled, and restore on the tail (+150 ms), not on the last delta.
+    this.ducked = true; clearTimeout(this.unduckTimer);
+    this.unduckTimer = setTimeout(() => { this.ducked = false; }, Math.max(0, (this.playhead - this.ctx.currentTime) * 1000) + 150);
   }
-  private stopPlayback() { this.playhead = 0; if (this.duck && this.ctx) { this.duck.disconnect(); this.duck = this.ctx.createGain(); this.duck.connect(this.ctx.destination); } }
+  /** Barge-in: drop scheduled audio and un-duck the mic. */
+  bargeIn() { this.stopPlayback(); this.send({ type: "response.cancel" }); }
+  private stopPlayback() { this.playhead = 0; this.ducked = false; clearTimeout(this.unduckTimer); if (this.duck && this.ctx) { this.duck.disconnect(); this.duck = this.ctx.createGain(); this.duck.connect(this.ctx.destination); } }
 
   close() {
     try { this.ws?.close(); } catch { /* noop */ }

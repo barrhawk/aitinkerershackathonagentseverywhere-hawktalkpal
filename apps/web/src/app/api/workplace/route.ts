@@ -21,6 +21,15 @@ async function ambiguous(path: string, body: unknown) {
   return { ok: r.ok, status: r.status, data };
 }
 
+/** Ambiguous returns ids, not links; attach a best-effort web URL so the page can offer "Open in Ambiguous". */
+function withUrl(data: unknown, build: (id: string) => string): unknown {
+  if (!data || typeof data !== "object") return data;
+  const d = data as Record<string, unknown>;
+  if (typeof d.url === "string" || typeof d.web_url === "string") return d;
+  const id = typeof d.id === "string" ? d.id : typeof (d.document as { id?: string } | undefined)?.id === "string" ? (d.document as { id: string }).id : undefined;
+  return id ? { ...d, url: build(id) } : d;
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 let channelCache: { at: number; list: Array<{ id: string; name?: string; slug?: string }> } | undefined;
 
@@ -48,13 +57,13 @@ export async function POST(request: Request) {
     const res = await ambiguous("/api/documents", {
       type: "doc", title: body.title || "Voice note", content: body.content || "",
     });
-    return Response.json({ ...res, action: body.action, ms: Date.now() - t0 }, { status: res.ok ? 200 : res.status });
+    return Response.json({ ...res, data: withUrl(res.data, (id) => `${BASE}/documents/${id}`), action: body.action, ms: Date.now() - t0 }, { status: res.ok ? 200 : res.status });
   }
   if (body.action === "tell_team") {
     const channel = await resolveChannel(body.channel || process.env.AMBIGUOUS_CHANNEL || "general");
     if (!channel.ok) return Response.json({ ok: false, status: channel.status, data: channel.data, action: body.action, ms: Date.now() - t0 }, { status: channel.status });
     const res = await ambiguous(`/api/channels/${encodeURIComponent(channel.id)}/messages`, { content: body.content || "" });
-    return Response.json({ ...res, action: body.action, ms: Date.now() - t0 }, { status: res.ok ? 200 : res.status });
+    return Response.json({ ...res, data: withUrl(res.data, () => `${BASE}/channels/${channel.id}`), action: body.action, ms: Date.now() - t0 }, { status: res.ok ? 200 : res.status });
   }
   return Response.json({ error: "Unknown action" }, { status: 400 });
 }
