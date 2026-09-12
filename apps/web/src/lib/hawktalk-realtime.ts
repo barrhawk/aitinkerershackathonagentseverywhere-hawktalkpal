@@ -304,7 +304,7 @@ export class HawkTalkRealtime {
         d = (await r.json()) as { text?: string; error?: string };
       }
       const text = (d.text ?? "").trim();
-      if (!r.ok || !text) { this.on.note?.(d.error ? `transcription: ${d.error}` : "didn't catch that"); this.on.latency?.({ done: 0 }); return; }
+      if (!r.ok || !text) { { const e = d.error as unknown; const msg = typeof e === "string" ? e : (e as { message?: string } | undefined)?.message ?? (e ? JSON.stringify(e) : ""); this.on.note?.(msg ? `transcription: ${msg}` : "didn't catch that"); } this.on.latency?.({ done: 0 }); return; }
       if (this.on.transcript?.("user", text, true) === true) { this.on.latency?.({ done: 0 }); return; } // yes/no answered the sheet; not a new turn
       this.send({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text }] } });
       this.send({ type: "response.create", response: { modalities: ["text", "audio"] } });
