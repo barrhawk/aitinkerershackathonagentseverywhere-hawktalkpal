@@ -92,7 +92,9 @@ export class HawkTalkRealtime {
   private preroll: string[] = [];   // last ~1.2 s of encoded frames for wake-word turns
   private ducked = false;
   private unduckTimer?: ReturnType<typeof setTimeout>;
-  private turnFrames: Uint8Array[] = [];   // raw pcm16 of the current turn, for STT-first turns
+  private turnFrames: Uint8Array[] = [];
+  private responding = false;        // a response is in flight on the server
+  private retriedCreate = false;   // raw pcm16 of the current turn, for STT-first turns
   /** Transcribe locally-captured audio via /api/hawk/stt and send input_text; the gateway's
    *  realtime path has no ASR while the voice card serves it. */
   sttFirst = true;
@@ -166,7 +168,7 @@ export class HawkTalkRealtime {
       case "conversation.item.input_audio_transcription.completed":
         this.on.transcript?.("user", e.transcript || this.meBuf, true); this.meBuf = ""; break;
       case "response.created":
-        this.aiBuf = ""; this.gotAudio = false; break;
+        this.responding = true; this.retriedCreate = false; this.aiBuf = ""; this.gotAudio = false; break;
       case "response.text.delta":
       case "response.audio_transcript.delta":
       case "response.output_audio_transcript.delta":
@@ -179,15 +181,26 @@ export class HawkTalkRealtime {
         void this.runTool(e);
         break;
       case "response.done":
+        this.responding = false;
         if (this.aiBuf) this.on.transcript?.("agent", this.aiBuf, true);
         this.on.latency?.({ done: performance.now() - this.tCommit });
         this.aiBuf = "";
         break;
-      case "error":
-        // Per-turn problem: surface it and let the next turn proceed. Only a dead socket ends the call.
-        this.on.note?.(e.error?.message || "gateway error");
+      case "error": {
+        const msg: string = e.error?.message || "gateway error";
+        // Benign races: a cancel with nothing to cancel, or a create while the previous turn's
+        // response is still marked active (cancel it and create once more).
+        if (/no active response/i.test(msg)) break;
+        if (/already has an active response/i.test(msg) && !this.retriedCreate) {
+          this.retriedCreate = true; this.responding = true;
+          this.send({ type: "response.cancel" });
+          setTimeout(() => this.send({ type: "response.create", response: { modalities: ["text", "audio"] } }), 250);
+          break;
+        }
+        this.on.note?.(msg);
         this.on.latency?.({ done: 0 });
         break;
+      }
     }
   }
 
@@ -228,7 +241,7 @@ export class HawkTalkRealtime {
     if (!this.ws) return;
     void this.ctx?.resume();
     this.stopPlayback();
-    this.send({ type: "response.cancel" });
+    if (this.responding) { this.send({ type: "response.cancel" }); this.responding = false; }
     this.send({ type: "input_audio_buffer.clear" });
     this.turnFrames = [];
     if (withPreroll) for (const b64 of this.preroll) { if (this.sttFirst) this.turnFrames.push(b64ToBytes(b64)); else this.send({ type: "input_audio_buffer.append", audio: b64 }); }
@@ -274,7 +287,7 @@ export class HawkTalkRealtime {
     this.unduckTimer = setTimeout(() => { this.ducked = false; }, Math.max(0, (this.playhead - this.ctx.currentTime) * 1000) + 150);
   }
   /** Barge-in: drop scheduled audio and un-duck the mic. */
-  bargeIn() { this.stopPlayback(); this.send({ type: "response.cancel" }); }
+  bargeIn() { this.stopPlayback(); if (this.responding) { this.send({ type: "response.cancel" }); this.responding = false; } }
   private stopPlayback() { this.playhead = 0; this.ducked = false; clearTimeout(this.unduckTimer); if (this.duck && this.ctx) { this.duck.disconnect(); this.duck = this.ctx.createGain(); this.duck.connect(this.ctx.destination); } }
 
   close() {

@@ -53,6 +53,17 @@ const VOICE_RULES = [
   "- The user may start with a wake phrase such as 'hey hawk'. Ignore the wake phrase itself.",
 ].join("\n");
 
+/** Compact persona for the HawkTalk realtime stack: its chat model runs with a 2048-token
+ *  context on the voice card, and the kit's full incident prompt plus tool schemas blew past it. */
+const HAWK_RULES = [
+  "You are Hawk, a voice assistant on the user's phone at a hackathon. Be warm and brief: one or two sentences.",
+  "Never read out URLs, ids or code; describe them.",
+  "Tools: search_web for facts; note_it creates a doc in the user's Ambiguous AI workspace; tell_team posts to the team chat there.",
+  "Before note_it or tell_team, say in one short sentence what you will file, then call the tool; the user approves by tap or by saying yes.",
+  "If a tool reports an error, say so plainly.",
+  "The user may start with the wake phrase 'hey hawk'; ignore it.",
+].join("\n");
+
 const noteParams = { type: "object", properties: { title: { type: "string" }, content: { type: "string" } }, required: ["title", "content"], additionalProperties: false };
 const tellParams = { type: "object", properties: { content: { type: "string" } }, required: ["content"], additionalProperties: false };
 const YES = /\b(yes|yeah|yep|approve|approved|send it|do it|go ahead|confirm)\b/i;
@@ -217,7 +228,7 @@ export default function VoicePage() {
       { name: "note_it", description: "Create a document in the user's Ambiguous AI workspace.", parameters: noteParams, execute: (a) => runWorkplace("note_it", a) },
       { name: "tell_team", description: "Post a message to the team's Ambiguous AI chat channel.", parameters: tellParams, execute: (a) => runWorkplace("tell_team", a) },
     ];
-    const hawk = new HawkTalkRealtime(cfg.endpoint, cfg.key, VOICE_RULES, tools, {
+    const hawk = new HawkTalkRealtime(cfg.endpoint, cfg.key, HAWK_RULES, tools, {
       status: (s, d) => { if (s === "error") { setError(d); setStatus("error"); } else if (s === "live") setStatus("live"); },
       note: (msg) => { setLines((l) => [...l, `agent  ⚠ ${msg}`]); setThinking(undefined); releaseAt.current = 0; },
       transcript: (role, text, final) => {
