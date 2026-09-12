@@ -37,15 +37,22 @@ Measured from the dev box, not the phone. Phone-side numbers after these changes
 - Endpointer hang cut from 900 → 700 ms. Kept at 900 ms.
 - OpenAI turn detection forced to semantic VAD, eagerness high. Kept at the SDK default.
 
+## Server-side: applied
+
+| Lever | Before | After | How measured |
+|---|---|---|---|
+| Public STT moved to the GPU speech-to-text on the voice box (was the CPU one on the gateway box) | 1,390–1,520 ms | 130–155 ms | Same 1.8 s utterance, 16 kHz and 24 kHz WAV, Bearer multipart and the browser's raw-WAV path, curl against the public API from a laptop, 2026-09-12. The app's server STT route went to 350–400 ms end to end; the integration suite still passes 11/11. |
+
+Expected effect on the HawkTalk realtime stack: release → first audio from ~2.1 s to under 1 s. Not yet timed on the phone.
+
 ## Server-side levers — proposed, not applied
 
-Ranked by expected saving. The "measured" figures are timings of each leg taken on the servers. None of these has been deployed, so no before/after exists.
+Ranked by expected saving. The "measured" figures are timings of each leg taken on the servers.
 
 | # | Lever | Leg today | Leg on the alternative | Expected effect |
 |---|---|---|---|---|
-| 1 | Route public STT to the GPU speech-to-text on the voice box instead of the CPU one on the gateway box | 1,300 ms on-box (1,410–1,450 ms public) | 28 ms warm (199 ms cold) | ~1.25 s off every HawkTalk realtime turn (~2.1 s → ~0.9 s release → first audio); copilot STT drops too |
 | 2 | Pass chatterbox's streamed chunks through the gateway instead of assembling one WAV | 1,710–1,740 ms public TTFB | 263 ms first chunk upstream | ~1.4 s off copilot time to first sound; needs a gateway code change plus chunked client playback |
 | 3 | If STT stays on CPU, give the CPU speech-to-text more threads or a smaller model | 1,300 ms | not measured | maybe 0.4–0.6 s, unverified |
 | 4 | Remove the extra relay hop on the realtime WS | ~5–10 ms | — | not worth touching |
 
-Levers 1 and 2 restart the public gateway, which drops live realtime sessions for ~5 s. Do not apply them during a demo or recording.
+Lever 2 restarts the public gateway, which drops live realtime sessions for ~5 s. Do not apply them during a demo or recording.
