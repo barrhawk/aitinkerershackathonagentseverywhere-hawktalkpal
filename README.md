@@ -88,8 +88,8 @@ Node 22+. Lockfile committed. `npm run verify` runs the typecheck and the kit's 
 ```bash
 # OpenAI Realtime stack + Exa search — enough for a live voice turn with search_web
 OPENAI_API_KEY=            # needs Realtime access
-NEXT_PUBLIC_REALTIME_MODEL=   # optional, default gpt-realtime-2.1
-NEXT_PUBLIC_REALTIME_VOICE=   # optional, default marin
+# NEXT_PUBLIC_REALTIME_MODEL=   # optional; leave commented unless set (empty overrides the default), default gpt-realtime-2.1
+# NEXT_PUBLIC_REALTIME_VOICE=   # optional; leave commented unless set (empty overrides the default), default marin
 EXA_API_KEY=
 EXA_SEARCH_TYPE=fast
 MODEL_PROVIDER=openai      # third stack's reasoning model (openai | openrouter)
