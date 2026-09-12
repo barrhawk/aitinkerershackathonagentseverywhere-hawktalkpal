@@ -20,6 +20,8 @@ export type HawkTool = {
 
 export type HawkEvents = {
   status: (s: "connecting" | "live" | "idle" | "error", detail?: string) => void;
+  /** Non-fatal, per-turn problem from the gateway (shown, not disconnected). */
+  note: (msg: string) => void;
   transcript: (role: "user" | "agent", text: string, final: boolean) => void;
   latency: (ms: { firstAudio?: number; done?: number }) => void;
   tool: (name: string, args: Record<string, unknown>, result?: string) => void;
@@ -41,6 +43,22 @@ function pcm16ToB64(f32: Float32Array): string {
     bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
   }
   return btoa(bin);
+}
+
+function b64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64); const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function wavFromPcm16(chunks: Uint8Array[], rate: number): Blob {
+  const n = chunks.reduce((a, c) => a + c.length, 0);
+  const buf = new ArrayBuffer(44 + n); const v = new DataView(buf); const u8 = new Uint8Array(buf);
+  const str = (o: number, t: string) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + n, true); str(8, "WAVE"); str(12, "fmt "); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, "data"); v.setUint32(40, n, true);
+  let o = 44; for (const c of chunks) { u8.set(c, o); o += c.length; }
+  return new Blob([buf], { type: "audio/wav" });
 }
 
 /** Linear resample from the hardware rate to 24 kHz. Browsers ignore the requested rate. */
@@ -74,6 +92,10 @@ export class HawkTalkRealtime {
   private preroll: string[] = [];   // last ~1.2 s of encoded frames for wake-word turns
   private ducked = false;
   private unduckTimer?: ReturnType<typeof setTimeout>;
+  private turnFrames: Uint8Array[] = [];   // raw pcm16 of the current turn, for STT-first turns
+  /** Transcribe locally-captured audio via /api/hawk/stt and send input_text; the gateway's
+   *  realtime path has no ASR while the voice card serves it. */
+  sttFirst = true;
 
   constructor(
     private endpoint: string,
@@ -162,7 +184,9 @@ export class HawkTalkRealtime {
         this.aiBuf = "";
         break;
       case "error":
-        this.on.status?.("error", e.error?.message || "gateway error");
+        // Per-turn problem: surface it and let the next turn proceed. Only a dead socket ends the call.
+        this.on.note?.(e.error?.message || "gateway error");
+        this.on.latency?.({ done: 0 });
         break;
     }
   }
@@ -191,6 +215,7 @@ export class HawkTalkRealtime {
       if (this.ducked) { frame = new Float32Array(input.length); for (let i = 0; i < input.length; i++) frame[i] = input[i] * DUCK; }
       const b64 = pcm16ToB64(resample(frame, this.hwRate, SAMPLE_RATE));
       if (!this.talking) { this.preroll.push(b64); while (this.preroll.length > Math.ceil(1.2 * this.hwRate / 4096)) this.preroll.shift(); return; }
+      if (this.sttFirst) { this.turnFrames.push(b64ToBytes(b64)); return; }
       this.send({ type: "input_audio_buffer.append", audio: b64 });
     };
     src.connect(node);
@@ -205,7 +230,8 @@ export class HawkTalkRealtime {
     this.stopPlayback();
     this.send({ type: "response.cancel" });
     this.send({ type: "input_audio_buffer.clear" });
-    if (withPreroll) for (const b64 of this.preroll) this.send({ type: "input_audio_buffer.append", audio: b64 });
+    this.turnFrames = [];
+    if (withPreroll) for (const b64 of this.preroll) { if (this.sttFirst) this.turnFrames.push(b64ToBytes(b64)); else this.send({ type: "input_audio_buffer.append", audio: b64 }); }
     this.preroll = [];
     this.talking = true;
   }
@@ -213,8 +239,22 @@ export class HawkTalkRealtime {
     if (!this.talking) return;
     this.talking = false;
     this.tCommit = performance.now();
+    if (this.sttFirst) { void this.sttThenSend(); return; }
     this.send({ type: "input_audio_buffer.commit" });
     this.send({ type: "response.create", response: { modalities: ["text", "audio"] } });
+  }
+  private async sttThenSend() {
+    const frames = this.turnFrames; this.turnFrames = [];
+    if (!frames.length) { this.on.note?.("nothing captured"); this.on.latency?.({ done: 0 }); return; }
+    try {
+      const r = await fetch("/api/hawk/stt", { method: "POST", headers: { "Content-Type": "audio/wav" }, body: wavFromPcm16(frames, SAMPLE_RATE) });
+      const d = (await r.json()) as { text?: string; error?: string };
+      const text = (d.text ?? "").trim();
+      if (!r.ok || !text) { this.on.note?.(d.error ? `transcription: ${d.error}` : "didn't catch that"); this.on.latency?.({ done: 0 }); return; }
+      this.on.transcript?.("user", text, true);
+      this.send({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text }] } });
+      this.send({ type: "response.create", response: { modalities: ["text", "audio"] } });
+    } catch (e) { this.on.note?.(`transcription failed: ${e instanceof Error ? e.message : String(e)}`); this.on.latency?.({ done: 0 }); }
   }
 
   private play(b64: string, rate: number) {
