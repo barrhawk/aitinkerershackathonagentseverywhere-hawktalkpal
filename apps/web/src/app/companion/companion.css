@@ -1,0 +1,55 @@
+/* Companion — laptop view of a phone voice session. Dark, large type, scoped under .cp so the kit's styles stay untouched. */
+.cp { --bg:#0e0f13; --panel:#171922; --panel2:#1f2230; --line:#2a2e3d; --fg:#f2f3f7; --mute:#9aa0b4; --acc:#5ee1a4; --acc2:#7aa2ff; --warn:#ffb454; --bad:#ff6b6b;
+  min-height:100dvh; background:var(--bg); color:var(--fg); font-family:"Plus Jakarta Sans",system-ui,sans-serif; font-size:17px; line-height:1.4; padding:22px 28px 40px; }
+.cp * { box-sizing:border-box; }
+.cp-top { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:18px; }
+.cp-brand { font-size:.8rem; letter-spacing:.1em; text-transform:uppercase; color:var(--mute); }
+.cp-title { font-size:2rem; font-weight:700; margin:2px 0 0; }
+.cp-pills { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.cp-pill { font-family:"Spline Sans Mono",monospace; font-size:.8rem; padding:8px 12px; border-radius:999px; border:1px solid var(--line); color:var(--mute); text-transform:uppercase; white-space:nowrap; }
+.cp-pill[data-s="live"] { color:var(--acc); border-color:var(--acc); }
+.cp-pill[data-s="connecting"], .cp-pill[data-s="warn"] { color:var(--warn); border-color:var(--warn); }
+.cp-pill[data-s="error"] { color:var(--bad); border-color:var(--bad); }
+.cp-grid { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(340px,1fr); gap:20px; align-items:start; }
+.cp-col h2 { font-size:.82rem; letter-spacing:.1em; text-transform:uppercase; color:var(--mute); margin:0 0 10px; }
+.cp-feed { display:flex; flex-direction:column; gap:10px; max-height:calc(100dvh - 190px); overflow:auto; padding-right:6px; scroll-behavior:smooth; }
+.cp-empty { color:var(--mute); padding:30px 10px; font-size:1.05rem; }
+.cp-empty code { font-family:"Spline Sans Mono",monospace; color:var(--acc2); font-size:inherit; }
+.cp-t { font-family:"Spline Sans Mono",monospace; font-size:.72rem; color:var(--mute); font-weight:400; margin-right:8px; opacity:.85; }
+.cp-msg { max-width:88%; padding:14px 18px; border-radius:18px; font-size:1.25rem; line-height:1.35; white-space:pre-wrap; }
+.cp-msg[data-role="you"] { align-self:flex-end; background:var(--acc2); color:#0b0c10; border-bottom-right-radius:5px; }
+.cp-msg[data-role="you"] .cp-t { color:#1b2340; }
+.cp-msg[data-role="agent"] { align-self:flex-start; background:var(--panel2); border:1px solid var(--line); border-bottom-left-radius:5px; }
+.cp-card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:12px 16px; }
+.cp-card h3 { margin:0 0 4px; font-size:1rem; }
+.cp-card[data-kind="tool"] { border-color:var(--acc2); }
+.cp-card[data-kind="ok"] { border-color:var(--acc); }
+.cp-card[data-kind="no"] { border-color:var(--bad); }
+.cp-card pre { margin:6px 0 0; font-family:"Spline Sans Mono",monospace; font-size:.85rem; color:var(--mute); white-space:pre-wrap; word-break:break-word; max-height:160px; overflow:auto; }
+.cp-card a { color:var(--acc2); font-size:1rem; }
+.cp-sub { color:var(--mute); font-size:.95rem; }
+.cp-gate { margin-top:12px; border-color:var(--warn); box-shadow:0 0 0 3px rgba(255,180,84,.15); }
+.cp-gate h3 { font-size:1.15rem; }
+.cp-actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:12px; }
+.cp-ok { padding:14px; border-radius:12px; border:0; background:var(--acc); color:#0b0c10; font:inherit; font-weight:700; font-size:1.05rem; }
+.cp-no { padding:14px; border-radius:12px; border:1px solid var(--line); background:transparent; color:var(--fg); font:inherit; font-weight:600; font-size:1.05rem; }
+.cp-big { background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:18px 20px; text-align:center; }
+.cp-big b { display:block; font-family:"Spline Sans Mono",monospace; font-size:5.5rem; line-height:1; letter-spacing:-.02em; }
+.cp-big[data-hot="1"] b { color:var(--acc); }
+.cp-big small { display:block; margin-top:8px; color:var(--mute); font-size:.9rem; }
+.cp-board { width:100%; border-collapse:collapse; margin-top:14px; font-size:1rem; }
+.cp-board th { text-align:left; font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; color:var(--mute); font-weight:600; padding:6px 8px; border-bottom:1px solid var(--line); }
+.cp-board td { padding:10px 8px; border-bottom:1px solid var(--line); font-family:"Spline Sans Mono",monospace; font-size:1.1rem; }
+.cp-board td:first-child { font-family:inherit; font-weight:600; }
+.cp-board tr[data-live="1"] td:first-child { color:var(--acc); }
+.cp-board tr[data-live="1"] td:first-child::before { content:"● "; font-size:.7em; vertical-align:middle; }
+.cp-verdict { margin-top:12px; text-align:center; font-weight:600; font-size:1rem; }
+.cp-verdict[data-win="hawk"] { color:var(--acc); }
+.cp-verdict[data-win="openai"] { color:var(--warn); }
+.cp-panel { margin-top:18px; background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:12px 16px; }
+.cp-panel summary { cursor:pointer; font-weight:600; font-size:1rem; }
+.cp-hint { color:var(--mute); font-size:.85rem; margin:8px 0 10px; }
+/* The kit's chat is light-themed; give it a light island so it stays readable. */
+.cp-chatwrap { background:#fff; color:#010507; color-scheme:light; border-radius:12px; padding:8px; }
+.cp-chat { min-height:360px; max-height:60dvh; }
+@media (max-width:900px) { .cp { padding:16px; } .cp-grid { grid-template-columns:1fr; } .cp-feed { max-height:none; } .cp-big b { font-size:4rem; } }

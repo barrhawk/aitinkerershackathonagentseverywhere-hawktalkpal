@@ -14,6 +14,10 @@
  * latency clock (end of speech → first sound). Every workplace write is shown
  * back as the record Ambiguous returned, with a link.
  *
+ * Everything the phone does is mirrored, fire-and-forget, to /api/relay so a
+ * laptop on /companion can watch along (transcripts, tool calls, approvals,
+ * results, latency). The relay never sits in the audio path.
+ *
  * Built during the Agents, Everywhere hackathon (2026-09-12). Inherited from the
  * kit: the OpenAI session wiring, SYSTEM_PROMPT, and the Exa search route.
  */
@@ -57,7 +61,13 @@ async function workplace(action: string, body: Record<string, unknown>): Promise
   const data = (await r.json()) as { ok?: boolean; status?: number; data?: unknown; ms?: number; error?: string };
   return { ok: r.ok && data.ok !== false, status: data.status ?? r.status, ms: data.ms, record: data.data ?? data.error };
 }
+/** Mirror an event to the laptop companion. Never awaited; a dead relay costs the phone nothing. */
+const relay = (type: string, payload: Record<string, unknown> = {}) => {
+  try { void fetch("/api/relay", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type, ...payload }), keepalive: true }).catch(() => undefined); }
+  catch { /* offline or no fetch */ }
+};
 async function search(query: string, results?: number) {
+  relay("tool_call", { name: "search_web", args: { query, results } });
   const r = await fetch("/api/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, results }) });
   if (!r.ok) return "Search is unavailable right now. Say so rather than guessing.";
   const d = (await r.json()) as { results?: unknown };
@@ -97,16 +107,15 @@ export default function VoicePage() {
   const releaseAt = useRef(0);
   const turnRef = useRef<Turn | undefined>(undefined);
   const lockRef = useRef<WakeLockSentinel | null>(null);
+  const relayedRef = useRef(new Set<string>());
   const { agent } = useAgent({ agentId: "default" });
 
   const now = () => new Date().toLocaleTimeString();
   const pushTurn = useCallback((patch: Partial<Turn>) => {
-    setTurns((ts) => {
-      const cur = turnRef.current; if (!cur) return ts;
-      const next = { ...cur, ...patch }; turnRef.current = next;
-      const i = ts.findIndex((t) => t === cur);
-      return i >= 0 ? [...ts.slice(0, i), next, ...ts.slice(i + 1)] : [...ts, next];
-    });
+    const cur = turnRef.current; if (!cur) return;
+    const next = { ...cur, ...patch }; turnRef.current = next;
+    setTurns((ts) => { const i = ts.findIndex((t) => t === cur); return i >= 0 ? [...ts.slice(0, i), next, ...ts.slice(i + 1)] : [...ts, next]; });
+    if (patch.done !== undefined) relay("latency", { provider: next.provider, firstAudio: next.firstAudio, done: next.done });
   }, []);
   const openTurn = useCallback((p: Provider) => { turnRef.current = { provider: p, at: now() }; setTurns((ts) => [...ts, turnRef.current!]); }, []);
 
@@ -115,6 +124,7 @@ export default function VoicePage() {
   useEffect(() => { wakeOnRef.current = wakeOn; try { localStorage.setItem("voice-ab", JSON.stringify({ provider, wakeOn, wakePhrase })); } catch { /* private mode */ } }, [provider, wakeOn, wakePhrase]);
   useEffect(() => { const up = () => setOnline(navigator.onLine); up(); window.addEventListener("online", up); window.addEventListener("offline", up); return () => { window.removeEventListener("online", up); window.removeEventListener("offline", up); }; }, []);
   useEffect(() => { if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => undefined); }, []);
+  useEffect(() => { if (error) relay("error", { provider, message: error }); }, [error, provider]);
   useEffect(() => {
     const acquire = async () => { if (status === "live" && "wakeLock" in navigator && document.visibilityState === "visible") { try { lockRef.current = await navigator.wakeLock.request("screen"); } catch { /* battery saver */ } } };
     if (status !== "live") { lockRef.current?.release().catch(() => undefined); lockRef.current = null; return; }
@@ -134,10 +144,15 @@ export default function VoicePage() {
   const gate = useCallback((name: string, args: Record<string, unknown>) =>
     new Promise<boolean>((resolve) => {
       const id = ++pendingSeq.current;
-      const item: Pending = { id, name, args, resolve: (ok) => { setPending((q) => { const n = q.filter((x) => x.id !== id); pendingRef.current = n; return n; }); resolve(ok); } };
+      relay("tool_call", { name, args });
+      const item: Pending = { id, name, args, resolve: (ok) => { setPending((q) => { const n = q.filter((x) => x.id !== id); pendingRef.current = n; return n; }); relay("approval", { name, ok }); resolve(ok); } };
       setPending((q) => { const n = [...q, item]; pendingRef.current = n; return n; });
     }), []);
-  const addResult = useCallback((name: string, res: { ok: boolean; status?: number; ms?: number; record?: unknown }) => setResults((r) => [{ name, ...res, at: now() }, ...r]), []);
+  const addResult = useCallback((name: string, res: { ok: boolean; status?: number; ms?: number; record?: unknown }) => {
+    setResults((r) => [{ name, ...res, at: now() }, ...r]);
+    const rec = res.record && typeof res.record === "object" ? (res.record as { id?: string; title?: string; url?: string; error?: string }) : undefined;
+    relay("result", { name, ok: res.ok, status: res.status, ms: res.ms, id: rec?.id, title: rec?.title, url: rec?.url, error: rec?.error ?? (typeof res.record === "string" ? res.record : undefined) });
+  }, []);
   const runWorkplace = useCallback(async (name: "note_it" | "tell_team", args: Record<string, unknown>) => {
     const ok = await gate(name, args);
     if (!ok) { addResult(name, { ok: false, status: 0, record: "declined by user" }); return "The user declined. Do not retry unless asked."; }
@@ -168,6 +183,13 @@ export default function VoicePage() {
         return text ? `${it.role === "user" ? "you" : "agent"}  ${text}` : "";
       }).filter(Boolean);
       setLines(out);
+      for (const it of history) {
+        if (it.type !== "message" || !("status" in it) || it.status !== "completed" || relayedRef.current.has(it.itemId)) continue;
+        const text = it.content.map((p) => ("transcript" in p ? p.transcript ?? "" : "text" in p ? p.text : "")).join(" ").trim();
+        if (!text) continue;
+        relayedRef.current.add(it.itemId);
+        relay(it.role === "user" ? "transcript" : "reply", { provider: "openai", role: it.role === "user" ? "user" : "agent", text });
+      }
       const lastUser = [...history].reverse().find((it) => it.type === "message" && it.role === "user");
       if (lastUser && lastUser.type === "message") { const t = lastUser.content.map((p) => ("transcript" in p ? p.transcript ?? "" : "")).join(" "); if (t) spokenDecision(t); }
     });
@@ -196,7 +218,7 @@ export default function VoicePage() {
     const hawk = new HawkTalkRealtime(cfg.endpoint, cfg.key, VOICE_RULES, tools, {
       status: (s, d) => { if (s === "error") { setError(d); setStatus("error"); } else if (s === "live") setStatus("live"); },
       transcript: (role, text, final) => {
-        if (final) { setLive(undefined); setLines((l) => [...l, `${role === "user" ? "you" : "agent"}  ${text}`]); if (role === "user") spokenDecision(text); }
+        if (final) { setLive(undefined); setLines((l) => [...l, `${role === "user" ? "you" : "agent"}  ${text}`]); relay(role === "user" ? "transcript" : "reply", { provider: "hawktalk", role: role === "user" ? "user" : "agent", text }); if (role === "user") spokenDecision(text); }
         else setLive({ role, text });
       },
       latency: (ms) => { if (ms.firstAudio !== undefined) { setThinking("speaking…"); pushTurn({ firstAudio: Math.round(ms.firstAudio) }); } if (ms.done !== undefined) { pushTurn({ done: Math.round(ms.done) }); setThinking(undefined); releaseAt.current = 0; } },
@@ -217,7 +239,7 @@ export default function VoicePage() {
       onTextMessageEndEvent: async ({ event }: { event: { messageId: string } }) => {
         const reply = (drafts.get(event.messageId) ?? "").trim(); drafts.delete(event.messageId);
         if (!reply) return;
-        setLines((l) => [...l, `agent  ${reply}`]); setThinking("speaking…");
+        setLines((l) => [...l, `agent  ${reply}`]); setThinking("speaking…"); relay("reply", { provider: "copilot", role: "agent", text: reply });
         try { const started = await speak(reply); if (releaseAt.current) { const ms = Math.round(started - releaseAt.current); pushTurn({ firstAudio: ms, done: ms }); releaseAt.current = 0; } }
         catch (e) { setError(e instanceof Error ? e.message : String(e)); }
         setThinking(undefined);
@@ -231,7 +253,7 @@ export default function VoicePage() {
     releaseAt.current = performance.now(); setThinking("transcribing…");
     const heard = await transcribe(wav);
     if (!heard.text) { setThinking(undefined); releaseAt.current = 0; return; }
-    setLines((l) => [...l, `you  ${heard.text}`]);
+    setLines((l) => [...l, `you  ${heard.text}`]); relay("transcript", { provider: "copilot", role: "user", text: heard.text });
     if (spokenDecision(heard.text)) { setThinking(undefined); releaseAt.current = 0; return; }
     setThinking("thinking…");
     agent.addMessage({ id: crypto.randomUUID(), role: "user", content: heard.text });
@@ -241,11 +263,13 @@ export default function VoicePage() {
 
   // ── lifecycle ───────────────────────────────────────────────────────────
   const connect = useCallback(async () => {
-    setStatus("connecting"); setError(undefined); setLines([]); setLive(undefined); unlockAudio();
-    try { if (provider === "openai") await connectOpenAI(); else if (provider === "copilot") await connectCopilot(); else await connectHawk(); setStatus("live"); }
+    setStatus("connecting"); setError(undefined); setLines([]); setLive(undefined); unlockAudio(); relayedRef.current.clear();
+    relay("stack", { provider, status: "connecting" });
+    try { if (provider === "openai") await connectOpenAI(); else if (provider === "copilot") await connectCopilot(); else await connectHawk(); setStatus("live"); relay("stack", { provider, status: "live" }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setStatus("error"); }
   }, [provider, connectOpenAI, connectHawk, connectCopilot]);
   const disconnect = useCallback(() => {
+    const wasUp = !!(oaRef.current || hawkRef.current || recRef.current);
     oaRef.current?.close(); oaRef.current = null;
     hawkRef.current?.close(); hawkRef.current = null;
     recRef.current?.close(); recRef.current = null;
@@ -254,6 +278,7 @@ export default function VoicePage() {
     setPending((q) => { q.forEach((x) => x.resolve(false)); pendingRef.current = []; return []; });
     releaseAt.current = 0; clock.current.t0 = 0;
     setStatus("idle"); setHolding(false); setThinking(undefined);
+    if (wasUp) relay("stack", { status: "idle" });
   }, []);
   useEffect(() => () => disconnect(), [disconnect]);
 
@@ -384,6 +409,8 @@ export default function VoicePage() {
       )}
 
       {provider === "copilot" && <VoiceTools mode="HawkTalk ears + CopilotKit agent" gate={gate} onResult={addResult} />}
+
+      <footer className="va-hint va-foot">companion: <a href="/companion">/companion</a> — open it on a laptop to watch this session live</footer>
 
       {pending.length > 0 && (
         <div className="va-sheet" role="dialog" aria-label="approval">
