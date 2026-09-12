@@ -26,6 +26,10 @@ export type HawkEvents = {
   latency: (ms: { firstAudio?: number; done?: number }) => void;
   tool: (name: string, args: Record<string, unknown>, result?: string) => void;
   level: (rms: number) => void;
+  /** true while an approval sheet is waiting for a spoken yes/no: hold the response until the transcript is checked. */
+  awaitingAnswer: () => boolean;
+  /** The server kept an untranscribable audio item (it has no delete); the session must be reopened. */
+  reset: () => void;
 };
 
 const SAMPLE_RATE = 24000;
@@ -95,9 +99,14 @@ export class HawkTalkRealtime {
   private turnFrames: Uint8Array[] = [];
   private responding = false;        // a response is in flight on the server
   private retriedCreate = false;   // raw pcm16 of the current turn, for STT-first turns
-  /** Transcribe locally-captured audio via /api/hawk/stt and send input_text; the gateway's
-   *  realtime path has no ASR while the voice card serves it. */
-  sttFirst = true;
+  /** false (default): stream mic pcm16 into the socket and let the gateway transcribe in-socket
+   *  (commit -> first audio ~0.45 s). true: upload a WAV to /v1/audio/transcriptions first (fallback). */
+  sttFirst = true;   // default stays the proven upload path; the page opts into live audio
+  private turnPeak = 0;              // loudest sample streamed this turn (silent-capture guard)
+  private voicedFrames = 0;          // frames loud enough to be speech this turn (tap guard)
+  private holdForAnswer = false;     // commit sent, response.create waits for the transcript
+  private fellBack = false;          // live audio's in-socket STT failed; this turn is being redone by upload
+  private poisoned = false;          // an empty audio item is in the server history; errors until reset
   private noSimpleStt = false;       // gateway refused the preflight-free STT form; use Bearer multipart
   private lastWarm = 0;
 
@@ -181,8 +190,31 @@ export class HawkTalkRealtime {
         break;
       case "conversation.item.input_audio_transcription.delta":
         this.meBuf = e.delta || this.meBuf; this.on.transcript?.("user", this.meBuf, false); break;
-      case "conversation.item.input_audio_transcription.completed":
-        this.on.transcript?.("user", e.transcript || this.meBuf, true); this.meBuf = ""; break;
+      case "conversation.item.input_audio_transcription.completed": {
+        const text = String(e.transcript || this.meBuf || "").trim(); this.meBuf = ""; this.turnFrames = [];
+        if (!text || /^\[?(blank_audio|silence|inaudible)\]?$/i.test(text)) {
+          // Empty transcript: the gateway keeps an untranscribed item that fails every later response. Reopen quietly.
+          this.holdForAnswer = false; this.poisoned = true;
+          this.on.note?.("didn't catch that — reconnecting"); this.on.latency?.({ done: 0 }); this.on.reset?.();
+          break;
+        }
+        const used = text ? this.on.transcript?.("user", text, true) === true : false;
+        if (this.holdForAnswer) {
+          this.holdForAnswer = false;
+          if (used || !text) { this.on.latency?.({ done: 0 }); if (!text) this.on.note?.("didn't catch that"); }
+          else this.send({ type: "response.create", response: { modalities: ["text", "audio"] } });
+        }
+        break;
+      }
+      case "conversation.item.input_audio_transcription.failed": {
+        // In-socket STT is down: drop the untranscribed item and redo this turn by upload, then stay on upload.
+        if (e.item_id) this.send({ type: "conversation.item.delete", item_id: e.item_id });
+        if (this.responding) { this.send({ type: "response.cancel" }); this.responding = false; }
+        this.holdForAnswer = false; this.sttFirst = true; this.fellBack = true;
+        this.on.note?.("in-socket transcription unavailable — using upload transcription");
+        void this.sttThenSend();
+        break;
+      }
       case "response.created":
         this.responding = true; this.retriedCreate = false; this.aiBuf = ""; this.gotAudio = false; break;
       case "response.text.delta":
@@ -207,6 +239,7 @@ export class HawkTalkRealtime {
         // Benign races: a cancel with nothing to cancel, or a create while the previous turn's
         // response is still marked active (cancel it and create once more).
         if (/no active response/i.test(msg)) break;
+        if (/untranscribed audio input/i.test(msg) && (this.fellBack || this.poisoned)) break;   // handled: fallback or reconnect
         if (/already has an active response/i.test(msg) && !this.retriedCreate) {
           this.retriedCreate = true; this.responding = true;
           this.send({ type: "response.cancel" });
@@ -245,6 +278,9 @@ export class HawkTalkRealtime {
       const b64 = pcm16ToB64(resample(frame, this.hwRate, SAMPLE_RATE));
       if (!this.talking) { this.preroll.push(b64); while (this.preroll.length > Math.ceil(1.2 * this.hwRate / 4096)) this.preroll.shift(); return; }
       if (this.sttFirst) { this.turnFrames.push(b64ToBytes(b64)); return; }
+      for (let i = 0; i < input.length; i += 8) { const a = Math.abs(input[i]) * 32767; if (a > this.turnPeak) this.turnPeak = a; }
+      if (Math.sqrt(sum / input.length) > 0.01) this.voicedFrames++;
+      this.turnFrames.push(b64ToBytes(b64));   // kept only as the upload fallback if in-socket STT fails
       this.send({ type: "input_audio_buffer.append", audio: b64 });
     };
     src.connect(node);
@@ -259,8 +295,8 @@ export class HawkTalkRealtime {
     this.stopPlayback();
     if (this.responding) { this.send({ type: "response.cancel" }); this.responding = false; }
     this.send({ type: "input_audio_buffer.clear" });
-    this.turnFrames = [];
-    if (withPreroll) for (const b64 of this.preroll) { if (this.sttFirst) this.turnFrames.push(b64ToBytes(b64)); else this.send({ type: "input_audio_buffer.append", audio: b64 }); }
+    this.turnFrames = []; this.turnPeak = 0; this.voicedFrames = 0; this.holdForAnswer = false;
+    if (withPreroll) for (const b64 of this.preroll) { this.turnFrames.push(b64ToBytes(b64)); if (!this.sttFirst) this.send({ type: "input_audio_buffer.append", audio: b64 }); }
     this.preroll = [];
     this.talking = true;
     this.warmStt();
@@ -270,8 +306,21 @@ export class HawkTalkRealtime {
     this.talking = false;
     this.tCommit = performance.now();
     if (this.sttFirst) { void this.sttThenSend(); return; }
-    this.send({ type: "input_audio_buffer.commit" });
-    this.send({ type: "response.create", response: { modalities: ["text", "audio"] } });
+    const peak = Math.round(this.turnPeak);
+    if (peak < 200) {
+      this.send({ type: "input_audio_buffer.clear" }); this.turnFrames = [];
+      this.on.note?.(`mic captured silence (peak ${peak}/32767) — another app or device may hold the mic; ctx ${this.ctx?.state ?? "?"} @${this.hwRate} Hz`);
+      this.on.latency?.({ done: 0 }); return;
+    }
+    if (this.voicedFrames < 1) {
+      // A tap with no speech: never commit it (the gateway can't drop an empty audio item once committed).
+      this.send({ type: "input_audio_buffer.clear" }); this.turnFrames = [];
+      this.on.note?.("didn't hear speech — hold the orb while you talk"); this.on.latency?.({ done: 0 }); return;
+    }
+    this.send({ type: "input_audio_buffer.commit" });   // gateway transcribes in-socket
+    // A pending approval must see the words first (a "yes" is an answer, not a new turn); otherwise answer at once.
+    if (this.on.awaitingAnswer?.()) this.holdForAnswer = true;
+    else this.send({ type: "response.create", response: { modalities: ["text", "audio"] } });
   }
   private async sttThenSend() {
     const frames = this.turnFrames; this.turnFrames = [];
