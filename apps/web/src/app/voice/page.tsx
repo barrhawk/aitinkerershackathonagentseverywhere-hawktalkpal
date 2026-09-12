@@ -233,11 +233,12 @@ export default function VoicePage() {
       { name: "tell_team", description: "Post a message to the team's Ambiguous AI chat channel.", parameters: tellParams, execute: (a) => runWorkplace("tell_team", a) },
     ];
     const hawk = new HawkTalkRealtime(cfg.endpoint, cfg.key, HAWK_RULES, tools, {
-      status: (s, d) => { if (s === "error") { setError(d); setStatus("error"); } else if (s === "live") setStatus("live"); },
+      status: (s, d) => { if (s === "error") { setError(d); setStatus("error"); } else if (s === "live") setStatus("live"); else if (s === "idle") { setError("HawkTalk socket closed — tap Start"); setStatus("error"); setThinking(undefined); } },
       note: (msg) => { setLines((l) => [...l, `agent  ⚠ ${msg}`]); setThinking(undefined); releaseAt.current = 0; },
       transcript: (role, text, final) => {
-        if (final) { setLive(undefined); setLines((l) => [...l, `${role === "user" ? "you" : "agent"}  ${text}`]); relay(role === "user" ? "transcript" : "reply", { provider: "hawktalk", role: role === "user" ? "user" : "agent", text }); if (role === "user") { spokenDecision(text); lastUserText.current = text; } }
+        if (final) { setLive(undefined); setLines((l) => [...l, `${role === "user" ? "you" : "agent"}  ${text}`]); relay(role === "user" ? "transcript" : "reply", { provider: "hawktalk", role: role === "user" ? "user" : "agent", text }); if (role === "user") { const used = spokenDecision(text); lastUserText.current = text; return used; } }
         else setLive({ role, text });
+        return false;
       },
       latency: (ms) => { if (ms.firstAudio !== undefined) { setThinking("speaking…"); pushTurn({ firstAudio: Math.round(ms.firstAudio) }); } if (ms.done !== undefined) { if (ms.done > 0) pushTurn({ done: Math.round(ms.done) }); setThinking(undefined); releaseAt.current = 0; } },
       level: (rms) => { setLevel(rms); endRef.current.level(rms); },
@@ -292,12 +293,6 @@ export default function VoicePage() {
   }, [agent, copilotkit, spokenDecision]);
 
   // ── lifecycle ───────────────────────────────────────────────────────────
-  const connect = useCallback(async () => {
-    setStatus("connecting"); setError(undefined); setLines([]); setLive(undefined); unlockAudio(); relayedRef.current.clear();
-    relay("stack", { provider, status: "connecting" });
-    try { if (provider === "openai") await connectOpenAI(); else if (provider === "copilot") await connectCopilot(); else await connectHawk(); setStatus("live"); relay("stack", { provider, status: "live" }); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setStatus("error"); }
-  }, [provider, connectOpenAI, connectHawk, connectCopilot]);
   const disconnect = useCallback(() => {
     const wasUp = !!(oaRef.current || hawkRef.current || recRef.current);
     oaRef.current?.close(); oaRef.current = null;
@@ -310,12 +305,19 @@ export default function VoicePage() {
     setStatus("idle"); setHolding(false); setThinking(undefined);
     if (wasUp) relay("stack", { status: "idle" });
   }, []);
+  const connect = useCallback(async () => {
+    disconnect(); // never stack a second session/mic on a failed or live one
+    setStatus("connecting"); setError(undefined); setLines([]); setLive(undefined); unlockAudio(); relayedRef.current.clear();
+    relay("stack", { provider, status: "connecting" });
+    try { if (provider === "openai") await connectOpenAI(); else if (provider === "copilot") await connectCopilot(); else await connectHawk(); setStatus("live"); relay("stack", { provider, status: "live" }); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setStatus("error"); }
+  }, [provider, connectOpenAI, connectHawk, connectCopilot, disconnect]);
   useEffect(() => () => disconnect(), [disconnect]);
 
   const bargeIn = () => { stopPlayback(); hawkRef.current?.bargeIn(); setThinking(undefined); };
   const holdStart = () => {
     unlockAudio(); vibe(15); bargeIn();
-    if (recRef.current) { if (thinking) return; recRef.current.resume(); setHolding(true); recRef.current.start(); return; }
+    if (recRef.current) { if (thinking && !pendingRef.current.length) return; recRef.current.resume(); setHolding(true); recRef.current.start(); return; }
     if (!hawkRef.current) return; setHolding(true); hawkRef.current.pressToTalk();
   };
   const holdEnd = () => {
@@ -346,6 +348,14 @@ export default function VoicePage() {
     window.addEventListener("hawk-wake", h);
     return () => window.removeEventListener("hawk-wake", h);
   }, [status]);
+  // Android shell: only one client gets the mic. Tell the native wake-word listener to
+  // step aside while the page is using it (recording, thinking/speaking, or an OpenAI WebRTC session).
+  useEffect(() => {
+    const n = (window as unknown as { HawkNative?: { postMessage(m: string): void } }).HawkNative;
+    if (!n) return;
+    const busy = status === "connecting" || (status === "live" && (provider === "openai" || holding || !!thinking));
+    try { n.postMessage(busy ? "mic:busy" : "mic:free"); } catch { /* not in the shell */ }
+  }, [status, provider, holding, thinking]);
   useEffect(() => {
     if (status !== "live" || !wakeOn) { wakeRef.current?.stop(); wakeRef.current = null; if (status === "live" && oaRef.current) oaRef.current.mute(false); if (!wakeOn) setWakeState(undefined); return; }
     if (!wakeWordSupported()) { setWakeState(/\bwv\b/.test(navigator.userAgent) ? `app is listening for "${wakePhrase}"` : "wake word needs Chrome; use the orb"); return; }

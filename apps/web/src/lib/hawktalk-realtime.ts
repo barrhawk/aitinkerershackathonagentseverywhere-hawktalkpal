@@ -22,7 +22,7 @@ export type HawkEvents = {
   status: (s: "connecting" | "live" | "idle" | "error", detail?: string) => void;
   /** Non-fatal, per-turn problem from the gateway (shown, not disconnected). */
   note: (msg: string) => void;
-  transcript: (role: "user" | "agent", text: string, final: boolean) => void;
+  transcript: (role: "user" | "agent", text: string, final: boolean) => boolean | void; // true = consumed as an approval answer
   latency: (ms: { firstAudio?: number; done?: number }) => void;
   tool: (name: string, args: Record<string, unknown>, result?: string) => void;
   level: (rms: number) => void;
@@ -274,7 +274,7 @@ export class HawkTalkRealtime {
       }
       const text = (d.text ?? "").trim();
       if (!r.ok || !text) { this.on.note?.(d.error ? `transcription: ${d.error}` : "didn't catch that"); this.on.latency?.({ done: 0 }); return; }
-      this.on.transcript?.("user", text, true);
+      if (this.on.transcript?.("user", text, true) === true) { this.on.latency?.({ done: 0 }); return; } // yes/no answered the sheet; not a new turn
       this.send({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text }] } });
       this.send({ type: "response.create", response: { modalities: ["text", "audio"] } });
     } catch (e) { this.on.note?.(`transcription failed: ${e instanceof Error ? e.message : String(e)}`); this.on.latency?.({ done: 0 }); }
@@ -301,6 +301,7 @@ export class HawkTalkRealtime {
   private stopPlayback() { this.playhead = 0; this.ducked = false; clearTimeout(this.unduckTimer); if (this.duck && this.ctx) { this.duck.disconnect(); this.duck = this.ctx.createGain(); this.duck.connect(this.ctx.destination); } }
 
   close() {
+    if (this.ws) { this.ws.onclose = null; this.ws.onerror = null; } // a deliberate close is not an error
     try { this.ws?.close(); } catch { /* noop */ }
     this.micNode?.disconnect();
     this.mic?.getTracks().forEach((t) => t.stop());
