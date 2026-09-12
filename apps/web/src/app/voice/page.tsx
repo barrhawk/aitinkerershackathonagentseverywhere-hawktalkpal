@@ -276,7 +276,18 @@ export default function VoicePage() {
     lastUserText.current = heard.text;
     setThinking("thinking…");
     agent.addMessage({ id: crypto.randomUUID(), role: "user", content: heard.text });
-    await copilotkit.runAgent({ agent });   // the core attaches useFrontendTool tools and runs the tool loop
+    const before = agent.messages.length;
+    try {
+      await copilotkit.runAgent({ agent });   // the core attaches useFrontendTool tools and runs the tool loop
+    } catch (e) {
+      setLines((l) => [...l, `agent  ⚠ CopilotKit agent failed: ${e instanceof Error ? e.message : String(e)}`]);
+    }
+    if (agent.messages.length <= before) {
+      // Nothing came back: say why, instead of a silent turn. Usually the runtime has no model key.
+      let why = "no reply from the CopilotKit runtime";
+      try { const r = await fetch("/api/copilotkit/info"); if (!r.ok) { const j = (await r.json().catch(() => ({}))) as { message?: string; error?: string }; why = j.message ?? j.error ?? `runtime HTTP ${r.status}`; } } catch { /* offline */ }
+      setLines((l) => [...l, `agent  ⚠ ${why}`]); releaseAt.current = 0;
+    }
     setThinking((t) => (t === "thinking…" ? undefined : t));
   }, [agent, copilotkit, spokenDecision]);
 
