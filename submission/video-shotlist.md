@@ -11,7 +11,7 @@ Everything here is read from `apps/web/src/app/voice/page.tsx`, `voice.css`, `li
 ## Before you press record (checklist, ~15 min)
 
 1. Server: `npm run dev --workspace web` (Next on `127.0.0.1:3100`). The phone must reach it on a **private host** — `/api/hawktalk-config` only answers on loopback, LAN (`10.*`, `192.168.*`, `100.64–127.*`) or a `*.ts.net` tailnet name. The mic needs HTTPS on a phone, so use the tailnet HTTPS hostname (`tailscale serve`) rather than a bare LAN IP.
-2. Open `https://<box>.<tailnet>.ts.net/voice` in **Chrome on Android** (the wake word uses the browser recognizer; Firefox shows "wake word needs Chrome; use the orb").
+2. Open `https://<your-https-host>/voice` in **Chrome on Android** (the wake word uses the browser recognizer; Firefox shows "wake word needs Chrome; use the orb").
 3. Env on the server (names only, no values on camera or in the repo): `HAWKTALK_API_KEY`, `OPENAI_API_KEY`, `EXA_API_KEY`, and either `AMBIGUOUS_API_KEY` or the claim-poller token file. Optional `AMBIGUOUS_CHANNEL` (defaults to `general`, else the first channel in the workspace). Optional `HAWKTALK_REALTIME_URL` (default `wss://hawktalk.ai/v1/realtime`).
 4. **Stack dependencies — know these before choosing a plan.** Each stack needs two things:
    - `HawkTalk` → `HAWKTALK_API_KEY` + the HawkTalk realtime socket up.
