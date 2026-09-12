@@ -31,7 +31,7 @@ import { REALTIME_MODEL } from "@/lib/realtime-config";
 import { HawkTalkRealtime, type HawkTool } from "@/lib/hawktalk-realtime";
 import { VoiceTools, type WorkplaceResult } from "@/components/voice-tools";
 import { AgentCards } from "@/components/agent-cards";
-import { TurnRecorder, transcribe, speak, unlockAudio, stopPlayback, onPlayback, chime } from "@/lib/hawk-rest";
+import { TurnRecorder, transcribe, createSpeechQueue, preconnect, unlockAudio, stopPlayback, onPlayback, chime, type HawkDirect } from "@/lib/hawk-rest";
 import { WakeWord, Endpointer, wakeWordSupported } from "@/lib/wake-word";
 import "./voice.css";
 
@@ -124,6 +124,8 @@ export default function VoicePage() {
   const { agent } = useAgent({ agentId: "default" });
   const { copilotkit } = useCopilotKit();
   const lastUserText = useRef("");
+  const directRef = useRef<HawkDirect | undefined>(undefined);
+  const tokenRef = useRef<{ value: string; at: number } | undefined>(undefined);
 
   const now = () => new Date().toLocaleTimeString();
   const pushTurn = useCallback((patch: Partial<Turn>) => {
@@ -140,6 +142,14 @@ export default function VoicePage() {
   useEffect(() => { const up = () => setOnline(navigator.onLine); up(); window.addEventListener("online", up); window.addEventListener("offline", up); return () => { window.removeEventListener("online", up); window.removeEventListener("offline", up); }; }, []);
   useEffect(() => { if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => undefined); }, []);
   useEffect(() => { if (error) relay("error", { provider, message: error }); }, [error, provider]);
+  // OpenAI stack selected and idle: keep a fresh ephemeral token on hand so Start skips the mint round trip.
+  useEffect(() => {
+    if (provider !== "openai" || status === "live" || status === "connecting") return;
+    let dead = false;
+    const mint = () => { fetch("/api/realtime-token", { method: "POST" }).then((r) => (r.ok ? r.json() : undefined)).then((d?: { value?: string }) => { if (!dead && d?.value) tokenRef.current = { value: d.value, at: performance.now() }; }).catch(() => undefined); };
+    mint(); const id = setInterval(mint, 40_000);
+    return () => { dead = true; clearInterval(id); };
+  }, [provider, status]);
   useEffect(() => {
     const acquire = async () => { if (status === "live" && "wakeLock" in navigator && document.visibilityState === "visible") { try { lockRef.current = await navigator.wakeLock.request("screen"); } catch { /* battery saver */ } } };
     if (status !== "live") { lockRef.current?.release().catch(() => undefined); lockRef.current = null; return; }
@@ -190,9 +200,15 @@ export default function VoicePage() {
     const noteTool = tool({ name: "note_it", description: "Create a document in the user's Ambiguous AI workspace.", parameters: z.object({ title: z.string(), content: z.string() }), execute: async (a) => runWorkplace("note_it", a) });
     const tellTool = tool({ name: "tell_team", description: "Post a message to the team's Ambiguous AI chat channel.", parameters: z.object({ content: z.string() }), execute: async (a) => runWorkplace("tell_team", a) });
     const rtAgent = new RealtimeAgent({ name: "Everywhere", instructions: VOICE_RULES, tools: [searchTool, noteTool, tellTool] });
-    const r = await fetch("/api/realtime-token", { method: "POST" });
-    const data = (await r.json()) as { value?: string; error?: string };
-    if (!r.ok || !data.value) throw new Error(data.error ?? "Could not mint a session token.");
+    // A token minted in the background while this stack sat selected makes Start instant; stale or missing = mint now.
+    let apiKey = tokenRef.current && performance.now() - tokenRef.current.at < 45_000 ? tokenRef.current.value : undefined;
+    tokenRef.current = undefined;
+    if (!apiKey) {
+      const r = await fetch("/api/realtime-token", { method: "POST" });
+      const data = (await r.json()) as { value?: string; error?: string };
+      if (!r.ok || !data.value) throw new Error(data.error ?? "Could not mint a session token.");
+      apiKey = data.value;
+    }
     const session = new RealtimeSession(rtAgent, { transport: "webrtc", model: REALTIME_MODEL });
     session.on("history_updated", (history) => {
       const out = history.filter((it) => it.type === "message").map((it) => {
@@ -217,7 +233,7 @@ export default function VoicePage() {
       else if (t === "response.done" && clock.current.t0) { pushTurn({ done: Math.round(performance.now() - clock.current.t0) }); clock.current.t0 = 0; setThinking(undefined); if (wakeOnRef.current) { session.mute(true); setWakeState(`listening for "${wakePhrase}"`); } }
     });
     session.on("error", (ev) => { setError(String((ev as { error?: unknown }).error ?? ev)); setStatus("error"); });
-    await session.connect({ apiKey: data.value });
+    await session.connect({ apiKey });
     if (wakeOnRef.current) session.mute(true);
     oaRef.current = session;
   }, [openTurn, pushTurn, runWorkplace, spokenDecision, wakePhrase]);
@@ -249,6 +265,11 @@ export default function VoicePage() {
 
   // ── HawkTalk ears + CopilotKit agent ────────────────────────────────────
   const connectCopilot = useCallback(async () => {
+    // Ears straight to HawkTalk from the browser when the config route allows it (private/listed hosts); else the /api/hawk/stt proxy.
+    directRef.current = undefined;
+    void fetch("/api/hawktalk-config", { method: "POST" }).then((r) => (r.ok ? r.json() : undefined)).then((cfg?: { apiUrl?: string; key?: string }) => {
+      if (cfg?.apiUrl && cfg.key) { directRef.current = { apiUrl: cfg.apiUrl, key: cfg.key }; preconnect(cfg.apiUrl); }
+    }).catch(() => undefined);
     const rec = new TurnRecorder(); rec.onLevel = (rms) => { setLevel(rms); endRef.current.level(rms); }; await rec.open(); recRef.current = rec;
     const offDuck = onPlayback((playing) => rec.setDuck(playing));
     unsubRef.current?.unsubscribe();
@@ -260,7 +281,7 @@ export default function VoicePage() {
     const pcm = new Int16Array(await wav.arrayBuffer(), 44); let peak = 0;
     for (let i = 0; i < pcm.length; i += 4) { const a = Math.abs(pcm[i]); if (a > peak) peak = a; }
     if (peak < 200) { setLines((l) => [...l, `agent  ⚠ mic captured silence (peak ${peak}/32767) — check the input device / mute, or another app holds the mic`]); setThinking(undefined); releaseAt.current = 0; return; }
-    const heard = await transcribe(wav);
+    const heard = await transcribe(wav, directRef.current);
     if (!heard.text) { setThinking(undefined); releaseAt.current = 0; return; }
     setLines((l) => [...l, `you  ${heard.text}`]); relay("transcript", { provider: "copilot", role: "user", text: heard.text });
     if (spokenDecision(heard.text)) { setThinking(undefined); releaseAt.current = 0; return; }
@@ -269,33 +290,47 @@ export default function VoicePage() {
     agent.addMessage({ id: crypto.randomUUID(), role: "user", content: heard.text });
     const before = agent.messages.length;
     // Subscribe on the agent we are about to run (CopilotKit swaps the instance once runtime info loads).
-    const drafts = new Map<string, string>(); const spoken: Promise<void>[] = [];
+    // Speak while the reply streams: each finished sentence goes to TTS at once (in parallel) and plays in order.
+    let heardFirst: () => void = () => undefined; const firstSound = new Promise<void>((res) => { heardFirst = res; });
+    const voice = createSpeechQueue(
+      (started) => { heardFirst(); setThinking("speaking…"); if (releaseAt.current) { const ms = Math.round(started - releaseAt.current); pushTurn({ firstAudio: ms, done: ms }); releaseAt.current = 0; } },
+      (e) => setError(e instanceof Error ? e.message : String(e)),
+    );
+    const drafts = new Map<string, { text: string; said: number }>();
+    const SENTENCE = /[.!?…]["')\]]*\s/g;   // a sentence end followed by whitespace, so "3.5" mid-stream never splits
+    const sayReady = (d: { text: string; said: number }) => {
+      SENTENCE.lastIndex = d.said; let end = -1; let m: RegExpExecArray | null;
+      while ((m = SENTENCE.exec(d.text))) end = m.index + m[0].length;
+      if (end - d.said >= 20) { voice.say(d.text.slice(d.said, end)); d.said = end; }
+    };
+    const finish = (id: string) => {
+      const d = drafts.get(id); drafts.delete(id); if (!d) return;
+      const reply = d.text.trim(); if (!reply) return;
+      voice.say(d.text.slice(d.said)); d.said = d.text.length;
+      setLines((l) => [...l, `agent  ${reply}`]); relay("reply", { provider: "copilot", role: "agent", text: reply });
+    };
     const sub = agent.subscribe({
-      onTextMessageStartEvent: ({ event }: { event: { messageId: string } }) => { drafts.set(event.messageId, ""); },
-      onTextMessageContentEvent: ({ event }: { event: { messageId: string; delta?: string } }) => { drafts.set(event.messageId, (drafts.get(event.messageId) ?? "") + (event.delta ?? "")); },
-      onTextMessageEndEvent: ({ event }: { event: { messageId: string } }) => {
-        const reply = (drafts.get(event.messageId) ?? "").trim(); drafts.delete(event.messageId);
-        if (!reply) return;
-        setLines((l) => [...l, `agent  ${reply}`]); setThinking("speaking…"); relay("reply", { provider: "copilot", role: "agent", text: reply });
-        spoken.push((async () => {
-          try { const started = await speak(reply); if (releaseAt.current) { const ms = Math.round(started - releaseAt.current); pushTurn({ firstAudio: ms, done: ms }); releaseAt.current = 0; } }
-          catch (e) { setError(e instanceof Error ? e.message : String(e)); }
-        })());
+      onTextMessageStartEvent: ({ event }: { event: { messageId: string } }) => { drafts.set(event.messageId, { text: "", said: 0 }); },
+      onTextMessageContentEvent: ({ event }: { event: { messageId: string; delta?: string } }) => {
+        const d = drafts.get(event.messageId) ?? { text: "", said: 0 }; d.text += event.delta ?? ""; drafts.set(event.messageId, d); sayReady(d);
       },
+      onTextMessageEndEvent: ({ event }: { event: { messageId: string } }) => finish(event.messageId),
     } as never);
     try {
       await copilotkit.runAgent({ agent });   // the core attaches useFrontendTool tools and runs the tool loop
     } catch (e) {
       setLines((l) => [...l, `agent  ⚠ CopilotKit agent failed: ${e instanceof Error ? e.message : String(e)}`]);
     } finally { sub.unsubscribe(); }
+    for (const id of [...drafts.keys()]) finish(id);   // a stream that never sent its end event still gets its tail spoken once
     // Fallback: if the stream events never reached us, speak the last assistant message from the transcript.
     const last = agent.messages[agent.messages.length - 1] as { role?: string; content?: unknown } | undefined;
-    if (spoken.length === 0 && agent.messages.length > before && last?.role === "assistant" && typeof last.content === "string" && last.content.trim()) {
+    if (voice.count === 0 && agent.messages.length > before && last?.role === "assistant" && typeof last.content === "string" && last.content.trim()) {
       const reply = last.content.trim(); setLines((l) => [...l, `agent  ${reply}`]); relay("reply", { provider: "copilot", role: "agent", text: reply });
-      spoken.push(speak(reply).then((started) => { if (releaseAt.current) { const ms = Math.round(started - releaseAt.current); pushTurn({ firstAudio: ms, done: ms }); releaseAt.current = 0; } }).catch((e) => setError(e instanceof Error ? e.message : String(e))));
+      voice.say(reply);
     }
-    await Promise.all(spoken);
-    if (spoken.length) { setThinking(undefined); releaseAt.current = 0; }
+    // Clear "speaking…" at first sound (as before): the orb must take a new hold and the native wake listener must get the mic back while the reply plays.
+    await Promise.race([firstSound, voice.drain()]);
+    if (voice.count) { setThinking(undefined); releaseAt.current = 0; }
     if (agent.messages.length <= before) {
       // Nothing came back: say why, instead of a silent turn. Usually the runtime has no model key.
       let why = "no reply from the CopilotKit runtime";
