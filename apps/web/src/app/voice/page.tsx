@@ -27,6 +27,7 @@ import { HawkTalkRealtime, type HawkTool } from "@/lib/hawktalk-realtime";
 import { CopilotChat, useAgent } from "@copilotkit/react-core/v2";
 import { VoiceTools } from "@/components/voice-tools";
 import { TurnRecorder, transcribe, speak, unlockAudio } from "@/lib/hawk-rest";
+import { WakeWord, Endpointer, wakeWordSupported } from "@/lib/wake-word";
 
 type Provider = "openai" | "hawktalk" | "copilot";
 type Status = "idle" | "connecting" | "live" | "error";
@@ -43,6 +44,7 @@ const VOICE_RULES = [
   "- You can act in the user's Ambiguous AI workspace with note_it (create a doc) and tell_team (post in chat).",
   "- Before any workplace write, say what you are about to file in one short sentence, then call the tool. The user approves it with a tap.",
   "- If a tool reports an error, say so plainly and do not pretend it worked.",
+  "- The user may start with a wake phrase such as 'hey hawk'. Ignore the wake phrase itself.",
 ].join("\n");
 
 const noteParams = { type: "object", properties: { title: { type: "string" }, content: { type: "string" } }, required: ["title", "content"], additionalProperties: false };
@@ -62,6 +64,14 @@ async function search(query: string, results?: number) {
 
 export default function VoicePage() {
   const [provider, setProvider] = useState<Provider>("hawktalk");
+  const [wakeOn, setWakeOn] = useState(false);
+  const [wakePhrase, setWakePhrase] = useState("hey hawk");
+  const [wakeState, setWakeState] = useState<string>();
+  const wakeRef = useRef<WakeWord | null>(null);
+  const endRef = useRef(new Endpointer());
+  const wakeOnRef = useRef(false);
+  useEffect(() => { try { const j = JSON.parse(localStorage.getItem("voice-ab") ?? "{}"); if (j.provider) setProvider(j.provider); if (typeof j.wakeOn === "boolean") setWakeOn(j.wakeOn); if (j.wakePhrase) setWakePhrase(j.wakePhrase); } catch { /* fresh browser */ } }, []);
+  useEffect(() => { wakeOnRef.current = wakeOn; try { localStorage.setItem("voice-ab", JSON.stringify({ provider, wakeOn, wakePhrase })); } catch { /* private mode */ } }, [provider, wakeOn, wakePhrase]);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string>();
   const [lines, setLines] = useState<string[]>([]);
@@ -131,10 +141,11 @@ export default function VoicePage() {
       const t = ev.type ?? "";
       if (t === "input_audio_buffer.speech_stopped") { clock.current = { t0: performance.now(), got: false }; openTurn("openai"); }
       else if ((t === "response.output_audio.delta" || t === "response.audio.delta") && !clock.current.got && clock.current.t0) { clock.current.got = true; pushTurn({ firstAudio: Math.round(performance.now() - clock.current.t0) }); }
-      else if (t === "response.done" && clock.current.t0) { pushTurn({ done: Math.round(performance.now() - clock.current.t0) }); clock.current.t0 = 0; }
+      else if (t === "response.done" && clock.current.t0) { pushTurn({ done: Math.round(performance.now() - clock.current.t0) }); clock.current.t0 = 0; if (wakeOnRef.current) { session.mute(true); setWakeState(`listening for "${wakePhrase}"`); } }
     });
     session.on("error", (ev) => { setError(String((ev as { error?: unknown }).error ?? ev)); setStatus("error"); });
     await session.connect({ apiKey: data.value });
+    if (wakeOnRef.current) session.mute(true);   // wake word opens the mic
     oaRef.current = session;
   }, [openTurn, pushTurn, runWorkplace]);
 
@@ -155,7 +166,7 @@ export default function VoicePage() {
         else setLive({ role, text });
       },
       latency: (ms) => { if (ms.firstAudio !== undefined) pushTurn({ firstAudio: Math.round(ms.firstAudio) }); if (ms.done !== undefined) pushTurn({ done: Math.round(ms.done) }); },
-      level: (rms) => setLevel(rms),
+      level: (rms) => { setLevel(rms); endRef.current.level(rms); },
     }, cfg.voice);
     await hawk.connect();
     hawkRef.current = hawk;
@@ -165,7 +176,7 @@ export default function VoicePage() {
   const releaseAt = useRef(0);
   const unsubRef = useRef<{ unsubscribe: () => void } | null>(null);
   const connectCopilot = useCallback(async () => {
-    const rec = new TurnRecorder(); await rec.open(); recRef.current = rec;
+    const rec = new TurnRecorder(); rec.onLevel = (rms) => { setLevel(rms); endRef.current.level(rms); }; await rec.open(); recRef.current = rec;
     // Speak every assistant message the agent finishes, including the one it
     // produces after an approval card is answered (that is a second run the
     // page does not start itself). Deltas are accumulated per message id.
@@ -200,6 +211,31 @@ export default function VoicePage() {
     setThinking((t) => (t === "thinking…" ? undefined : t));
   }, [agent]);
 
+  /** A wake phrase was heard: open a turn on whichever stack is live and let the endpointer close it. */
+  const onWake = useCallback(() => {
+    if (thinking || holding) return;
+    unlockAudio();
+    if (oaRef.current) { oaRef.current.mute(false); setWakeState("mic open — talk"); return; }   // server VAD ends the turn
+    if (recRef.current) {
+      const rec = recRef.current; rec.start(true); setHolding(true); setWakeState("listening…");
+      endRef.current.begin(() => { setHolding(false); openTurn("copilot"); const wav = rec.stop(); setWakeState(`listening for "${wakePhrase}"`); copilotTurn(wav).catch((e) => { setError(e instanceof Error ? e.message : String(e)); setThinking(undefined); }); });
+      return;
+    }
+    if (hawkRef.current) {
+      const hawk = hawkRef.current; hawk.pressToTalk(true); setHolding(true); setWakeState("listening…");
+      endRef.current.begin(() => { setHolding(false); openTurn("hawktalk"); hawk.release(); setWakeState(`listening for "${wakePhrase}"`); });
+    }
+  }, [thinking, holding, openTurn, copilotTurn, wakePhrase]);
+  const onWakeRef = useRef(onWake); useEffect(() => { onWakeRef.current = onWake; }, [onWake]);
+
+  useEffect(() => {
+    if (status !== "live" || !wakeOn) { wakeRef.current?.stop(); wakeRef.current = null; if (status === "live" && oaRef.current) oaRef.current.mute(false); if (!wakeOn) setWakeState(undefined); return; }
+    if (!wakeWordSupported()) { setWakeState("wake word needs Chrome (Android/desktop); use hold-to-talk"); return; }
+    const w = new WakeWord(wakePhrase, () => onWakeRef.current(), setWakeState); wakeRef.current = w; w.start();
+    if (oaRef.current) oaRef.current.mute(true);
+    return () => { w.stop(); };
+  }, [status, wakeOn, wakePhrase]);
+
   const connect = useCallback(async () => {
     setStatus("connecting"); setError(undefined); setLines([]); setLive(undefined);
     try { if (provider === "openai") await connectOpenAI(); else if (provider === "copilot") await connectCopilot(); else await connectHawk(); setStatus("live"); }
@@ -212,6 +248,7 @@ export default function VoicePage() {
     recRef.current?.close(); recRef.current = null;
     unsubRef.current?.unsubscribe(); unsubRef.current = null;
     setPending((q) => { q.forEach((x) => x.resolve(false)); return []; });
+    endRef.current.cancel(); wakeRef.current?.stop(); wakeRef.current = null;
     setStatus("idle"); setHolding(false); setThinking(undefined);
   }, []);
   useEffect(() => () => disconnect(), [disconnect]);
@@ -244,6 +281,12 @@ export default function VoicePage() {
         <label style={{ marginRight: "1.5rem" }}><input type="radio" name="p" checked={provider === "openai"} onChange={() => setProvider("openai")} /> OpenAI Realtime</label>
         <label><input type="radio" name="p" checked={provider === "copilot"} onChange={() => setProvider("copilot")} /> HawkTalk ears + CopilotKit agent</label>
       </fieldset>
+
+      <div style={{ marginTop: "0.75rem", display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "center" }}>
+        <label><input type="checkbox" checked={wakeOn} onChange={(e) => setWakeOn(e.target.checked)} /> Wake word</label>
+        <input type="text" value={wakePhrase} onChange={(e) => setWakePhrase(e.target.value)} disabled={!wakeOn} style={{ padding: "0.4rem 0.6rem", minWidth: "10rem" }} aria-label="wake phrase" />
+        {wakeState && <span className="ck-status" data-status={holding ? "live" : "idle"}>{wakeState}</span>}
+      </div>
 
       <div className="ck-actions" style={{ marginTop: "1rem" }}>
         {status === "live" ? (

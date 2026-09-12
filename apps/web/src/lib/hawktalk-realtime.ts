@@ -70,6 +70,7 @@ export class HawkTalkRealtime {
   private aiBuf = "";
   private meBuf = "";
   private hwRate = 48000;
+  private preroll: string[] = [];   // last ~1.2 s of encoded frames for wake-word turns
 
   constructor(
     private endpoint: string,
@@ -183,21 +184,24 @@ export class HawkTalkRealtime {
       const input = ev.inputBuffer.getChannelData(0);
       let sum = 0; for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
       this.on.level?.(Math.sqrt(sum / input.length));
-      if (!this.talking) return;
-      this.send({ type: "input_audio_buffer.append", audio: pcm16ToB64(resample(input, this.hwRate, SAMPLE_RATE)) });
+      const b64 = pcm16ToB64(resample(input, this.hwRate, SAMPLE_RATE));
+      if (!this.talking) { this.preroll.push(b64); while (this.preroll.length > Math.ceil(1.2 * this.hwRate / 4096)) this.preroll.shift(); return; }
+      this.send({ type: "input_audio_buffer.append", audio: b64 });
     };
     src.connect(node);
     const sink = this.ctx.createGain(); sink.gain.value = 0; node.connect(sink); sink.connect(this.ctx.destination);
     this.micNode = node;
   }
 
-  /** Hold-to-talk: press opens the turn, release commits it. */
-  pressToTalk() {
+  /** Hold-to-talk: press opens the turn, release commits it. With `withPreroll` the last second of audio is sent first (wake word). */
+  pressToTalk(withPreroll = false) {
     if (!this.ws) return;
     void this.ctx?.resume();
     this.stopPlayback();
     this.send({ type: "response.cancel" });
     this.send({ type: "input_audio_buffer.clear" });
+    if (withPreroll) for (const b64 of this.preroll) this.send({ type: "input_audio_buffer.append", audio: b64 });
+    this.preroll = [];
     this.talking = true;
   }
   release() {

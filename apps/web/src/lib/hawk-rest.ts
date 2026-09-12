@@ -10,8 +10,10 @@ export class TurnRecorder {
   private mic?: MediaStream;
   private node?: ScriptProcessorNode;
   private chunks: Float32Array[] = [];
+  private preroll: Float32Array[] = [];   // last ~1.2 s, so a wake-word turn keeps the words said before capture started
   private recording = false;
   hwRate = 48000;
+  onLevel?: (rms: number) => void;
 
   async open() {
     this.mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
@@ -19,11 +21,16 @@ export class TurnRecorder {
     this.hwRate = this.ctx.sampleRate;
     const src = this.ctx.createMediaStreamSource(this.mic);
     this.node = this.ctx.createScriptProcessor(4096, 1, 1);
-    this.node.onaudioprocess = (ev) => { if (this.recording) this.chunks.push(new Float32Array(ev.inputBuffer.getChannelData(0))); };
+    this.node.onaudioprocess = (ev) => {
+      const buf = new Float32Array(ev.inputBuffer.getChannelData(0));
+      if (this.onLevel) { let sum = 0; for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i]; this.onLevel(Math.sqrt(sum / buf.length)); }
+      if (this.recording) this.chunks.push(buf);
+      else { this.preroll.push(buf); while (this.preroll.length > Math.ceil(1.2 * this.hwRate / 4096)) this.preroll.shift(); }
+    };
     const sink = this.ctx.createGain(); sink.gain.value = 0;
     src.connect(this.node); this.node.connect(sink); sink.connect(this.ctx.destination);
   }
-  start() { this.chunks = []; this.recording = true; }
+  start(withPreroll = false) { this.chunks = withPreroll ? [...this.preroll] : []; this.preroll = []; this.recording = true; }
   /** Stop and return a 16 kHz mono WAV. */
   stop(): Blob {
     this.recording = false;
