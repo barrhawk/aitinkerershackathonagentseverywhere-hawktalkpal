@@ -7,7 +7,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 
-const TOKEN_FILE = process.env.AMBIGUOUS_TOKEN_FILE ?? "/home/osprey/hack/ambiguous-token.json";
+const TOKEN_FILE = process.env.AMBIGUOUS_TOKEN_FILE ?? "ambiguous-token.json"; // set AMBIGUOUS_TOKEN_FILE to an absolute path outside the repo
 const TOKEN_ENDPOINT = "https://app.ambiguous.ai/oauth/token";
 const RESOURCE = "https://app.ambiguous.ai/mcp";
 

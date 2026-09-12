@@ -1,110 +1,90 @@
-<div align="center">
+# Hey Hawk — a voice agent on the phone in your hand
 
-# Agents, Everywhere Hackathon Starter Kit
+Built at AI Tinkerers **Agents, Everywhere** (Seattle, 2026-09-12) on the official [CopilotKit starter kit](README-starter-kit.md).
 
-![Agents, Everywhere hackathon — OpenAI, CopilotKit, OpenRouter, Exa, Auth0, and Ambiguous AI](assets/banner.png)
+Say **"hey hawk"**. It answers out loud. It searches the web, files a note as an Ambiguous AI document, or posts to your team's Ambiguous channel. Before any write it shows the exact text on an approval sheet; tap, or say yes or no. The next card shows the record Ambiguous returned, with a link.
 
-**Build an agent that belongs where people already work, talk, and live.**
+One page, **three switchable voice stacks**, same tools, same approval sheet, a per-turn clock on every one:
 
-[Overview](#overview) · [Get started](#get-started) · [Templates](#templates) · [Coding agent](#coding-agent) · [Resources](#resources)
+| Stack | Hears | Thinks | Speaks |
+|---|---|---|---|
+| **OpenAI Realtime** | OpenAI (WebRTC, server VAD) | OpenAI Realtime | OpenAI |
+| **HawkTalk** | HawkTalk STT | HawkTalk models on HawkTalk silicon | HawkTalk Chatterbox voice tier |
+| **HawkTalk ears + CopilotKit agent** | HawkTalk STT | the kit's CopilotKit agent (`MODEL_PROVIDER`: OpenAI or OpenRouter) | HawkTalk |
 
-</div>
+Tools everywhere: `search_web` (Exa), `note_it` (Ambiguous document), `tell_team` (Ambiguous channel message, optionally bridged to Slack via CopilotKit Channels).
 
-## Overview
+## What runs on this build
 
-Build for **[Agents, Everywhere: Bots, Channels, & More](https://aitinkerers.org/hackathons/global/agents-everywhere)**, the AI Tinkerers global hackathon on **September 12–13, 2026**. Choose your city on the event page for its local schedule. Put an agent inside a conversation, an app, a phone, or a physical environment. Make the context of that place essential to what it can do.
+Every stack has completed live spoken turns on 2026-09-12 (phone and laptop). Verified at the routes on the same day: Exa search, Ambiguous document create, Ambiguous channel post, HawkTalk STT/TTS, OpenAI ephemeral token, CopilotKit agent run with streaming reply. `npm run verify` (typecheck + the kit's offline tests) passes.
 
-This kit gives you three runnable templates, files to hand to your coding agent, and sponsor setup notes. Pick a user, a problem, and one complete interaction. You can use any stack; you do not need every sponsor or every surface.
+## Layout
 
-Your project and its core functionality must be created during the event. Existing libraries, templates, and starter code are allowed; describe what you reuse and what you build. Read [the rules](hackathon-rules.md), then follow your city's participant portal for the current deadline and judging criteria.
+- `apps/web/src/app/voice/` — the phone-first page (orb, stack switcher, wake chip, stat strip, transcript, result cards, approval sheet).
+- `apps/web/src/lib/hawktalk-realtime.ts` — HawkTalk realtime client (OpenAI-dialect websocket, STT-first, ducking, barge-in, silent-mic guard).
+- `apps/web/src/lib/hawk-rest.ts`, `lib/wake-word.ts` — turn recorder, TTS playback, browser wake word + endpointer.
+- `apps/web/src/components/voice-tools.tsx` — the three tools as CopilotKit `useFrontendTool`s for the third stack.
+- `apps/web/src/app/api/` — `hawktalk-config`, `hawk/stt`, `hawk/tts`, `workplace` (Ambiguous), `search` (Exa), `realtime-token` (OpenAI), `relay` (companion page feed), `copilotkit` (runtime).
+- `apps/web/src/app/companion/` — laptop page that watches the phone's transcript, tool calls and approvals live.
+- `apps/android-shell/` — Flutter wrapper: WebView + native wake word + mic handoff ([README](apps/android-shell/README.md)).
+- `submission/` — description, architecture, video shot list, social post.
 
-## Get started
+## Run it
 
-### Onboarding Prompt
+Node 22+. Lockfile committed.
 
-For web, paste this into your coding agent:
-
-```text
-Help me get started with CopilotKit. Run this command and follow the instructions:
-
-npx --yes copilotkit@latest onboard start
+```bash
+git clone <this repo> && cd <repo>
+npm ci
+cp .env.example .env   # then add the block below
+npm run verify
+npm run dev:web        # http://127.0.0.1:3100/voice
 ```
 
-For Slack, follow [Channels setup](apps/channel/README.md#get-started). For React Native, follow the [Expo setup instructions](apps/mobile/README.md#get-started).
+```bash
+# OpenAI Realtime stack + Exa search — enough for a live voice turn with search_web
+OPENAI_API_KEY=            # needs Realtime access
+EXA_API_KEY=
+MODEL_PROVIDER=openai      # third stack's reasoning model (openai | openrouter)
+MODEL=gpt-5.6-sol
+OPENROUTER_API_KEY=        # only if MODEL_PROVIDER=openrouter
 
-## Templates
+# HawkTalk stacks (account-dependent)
+HAWKTALK_API_KEY=
+HAWKTALK_REALTIME_URL=wss://api.hawktalk.ai/v1/realtime
+HAWKTALK_API_URL=https://api.hawktalk.ai
+HAWKTALK_TTS_MODEL=chatterbox
+HAWKTALK_VOICE=warm_us_female_support
 
-These starting points serve different kinds of context. **CopilotKit Channels** brings the Slack agent into the conversation; **CopilotKit React** connects the web agent to the app people are using; **CopilotKit React Native** brings the same agent pattern onto a phone.
+# Ambiguous writes (account-dependent): a REST bearer, or a service-auth token file outside the repo
+AMBIGUOUS_API_KEY=
+AMBIGUOUS_TOKEN_FILE=/absolute/path/ambiguous-token.json
+AMBIGUOUS_CHANNEL=general
+```
 
-### 1. Slack — an agent that joins the thread
+Pick a stack, press **Start**, hold the orb and talk (HawkTalk stacks) or just talk (OpenAI, server VAD). Turn on **Wake word** and say "hey hawk" for hands-free.
 
-**OpenAI + CopilotKit Channels + Exa**
+1. "Hey hawk, what's the weather in Seattle right now?" → `search_web`, spoken answer.
+2. "Note that the Realtime key is pending." → approval sheet → **Approve** or say "yes" → result card with the document link.
+3. "Tell the team the demo is at four." → approval sheet → **Decline** or say "no" → nothing is written.
+4. Tap the orb while it speaks → barge-in.
 
-An agent reads what people already said, researches with Exa, and answers in the same thread with native cards and source links. Start with a support conversation, a research discussion, or a team decision.
+### Phone
 
-The included Slack app supplies thread history, subscriptions, search, and Channels UI. Configure your model, Exa, and a managed Channel, then run `npm run dev:slack`. No public tunnel is needed. Teams or other chat platforms can use the same Channels pattern, but this starter ships the Slack app.
+The mic needs HTTPS. Put any HTTPS terminator in front of `127.0.0.1:3100` (mkcert + Caddy/nginx, `tailscale serve`, a self-signed proxy) and open `https://<host>/voice` on the phone; **Add to Home screen** gives you the PWA (wake lock, haptics, offline state). Or build the Android shell for the native wake word.
 
-**[Use the Slack template →](apps/channel/)**
+`api/hawktalk-config` hands the HawkTalk key to the browser (the socket authenticates in the websocket subprotocol), so it only answers on loopback, LAN, tailnet, or hosts listed in a `.public-hosts` file at the repo root. Use a demo key and rotate it after.
 
-### 2. Web — an agent inside your app
+## House rules baked in
 
-**OpenAI + CopilotKit React + Ambiguous AI**
+- **Ducking, not echo cancellation**: the mic is captured raw and attenuated to 8% while the agent speaks, never muted, so barge-in registers.
+- **A silent capture is an error, not a guess**: if the mic delivers silence (muted, wrong device, another app holds it) the page says so instead of sending it to a model.
+- **Writes are gated**: nothing reaches Ambiguous without the sheet; a spoken "yes" is only accepted after the request, never from the sentence that made it.
 
-An agent sees the page you are on and turns a request into a real workplace record you can still find after a refresh. Adapt it to customer follow-ups, a project workspace, or a personal planning app.
+## Inherited vs built
 
-The included web app supplies page context, frontend tools, agent-rendered UI, and a browser approval step. Connect an Ambiguous AI workspace, then run `npm run dev:web`; approved follow-ups are saved through the server and can be read back after refresh.
+Base commit `5c8bf4c` is the official starter kit, unmodified. Everything after it on this branch was written during the event (26 commits, 38 files, +2494/−132): the three-stack voice page and shell, the HawkTalk realtime and REST clients, wake word + endpointer, approval queue and spoken decisions, Ambiguous workplace routes with service-auth renewal, the companion page and relay, generative-UI record cards, the CopilotKit Channels Slack bridge, the PWA, and the Android shell.
 
-**[Use the web template →](apps/web/)**
+Inherited and reused as-is: the OpenAI Realtime token route, the Exa search route, `packages/agent-core` and the CopilotKit runtime.
 
-### 3. React Native — an agent in your pocket
-
-**OpenAI or OpenRouter + CopilotKit React Native**
-
-A mobile agent reads app state, renders native cards, and waits for a tap before changing local sample data. Start with a personal finance assistant, a field checklist, an inventory counter, or any workflow where phone context and approval matter.
-
-The included Expo app supplies seeded finance state, native rendered tool UI, a human-in-the-loop expense approval, and a mobile-specific CopilotKit runtime endpoint served by the web app. Configure your model provider, start `npm run dev:web`, then run the mobile app from `apps/mobile`.
-
-**[Use the React Native template →](apps/mobile/)**
-
-### Make the demo yours
-
-The supplied on-call and finance assistants are **infrastructure examples**: read ambient context, call a tool, render useful UI, and return a verifiable result. Choose a different user, problem, dataset, and interaction; the goal is your own project, not another version of the starter scenario.
-
-Use the [demo prompts](dev-docs/demo-prompts.md) to learn how the pieces connect, then replace the sample domain. In the Slack sample incident flow, approval cards record decisions without executing production actions. In the web follow-up flow, the page approval button saves the reviewed Ambiguous task. In the mobile finance flow, approval changes local in-memory sample data. Enforce the same kind of write boundary around any external action you add.
-
-Want another surface pattern? The web app also includes a voice route, and the shared agent can connect to remote MCP tools when configured. The event surfaces are inspiration, not separate tracks or a requirement to build multiple apps.
-
-## Coding agent
-
-Give your agent these files before it starts coding:
-
-| File | What it provides |
-|---|---|
-| [hackathon-overview.md](hackathon-overview.md) | The challenge, four surfaces, and official judging criteria |
-| [hackathon-rules.md](hackathon-rules.md) | Build eligibility, inherited code, and required deliverables |
-| [using-sponsor-tools.md](using-sponsor-tools.md) | Every sponsor featured in this kit: access, authentication, configuration, and a first working call |
-| [AGENTS.md](AGENTS.md) | Repository conventions and verification commands |
-| [Channels skill](.agents/skills/build-channels-agent/SKILL.md) | Verified Channels APIs for the Slack template |
-
-The app READMEs provide launch commands, files to customize, and a concrete result to check. Start with one template and add a second surface only if it helps your user.
-
-## Resources
-
-| Need | Go here |
-|---|---|
-| Event details, deadline, and judging | [Find your city](https://aitinkerers.org/hackathons/global/agents-everywhere), then open its participant portal and handbook |
-| OpenAI agent development | [Agents SDK quickstart](https://openai.github.io/openai-agents-js/guides/quickstart/) |
-| OpenRouter access and model choice | [Quickstart](https://openrouter.ai/docs/quickstart) · [Keys](https://openrouter.ai/keys) · [Model catalog](https://openrouter.ai/models) · [Model switching](dev-docs/model-switching.md) |
-| CopilotKit app development | [Docs](https://docs.copilotkit.ai/) · [Tools and context](dev-docs/tools-and-context.md) · [Discord channel for technical questions](https://discord.com/channels/1122926057641742418/1548038338848489532) |
-| CopilotKit Channels | [Channels guide](https://copilotkit.ai/channels-guide.md) · [Screenshot walkthrough](dev-docs/channels-sdk-walkthrough/README.md) · [OpenTag example app](https://github.com/CopilotKit/OpenTag) |
-| Exa quickstart | [Search API guide](https://exa.ai/docs/reference/search-api-guide) · [Kit setup](using-sponsor-tools.md#exa) |
-| Auth0 API authorization | [Node API](https://auth0.com/docs/quickstart/backend/nodejs) · [Kit setup](using-sponsor-tools.md#auth0) |
-| Ambiguous AI quickstart | [Developer guide](https://www.ambiguous.ai/llms.txt) · [Kit setup](using-sponsor-tools.md#ambiguous-ai) |
-| Rehearse and debug | [Demo prompts](dev-docs/demo-prompts.md) · [Troubleshooting](dev-docs/troubleshooting.md) |
-| Prepare your entry | [Submission checklist](SUBMISSION.md) |
-
-For credit redemption instructions, choose your city on the [global event page](https://aitinkerers.org/hackathons/global/agents-everywhere) and check its participant portal's **Credits & Offers** section.
-
-For technical questions during the event, check your city's participant portal and ask your local organizers.
-
-For the Slack/web workspaces, `npm run verify` runs typechecks and offline tests without credentials. The mobile app has its own install, tests, typecheck, and Metro export checks under `apps/mobile`. Each app reports missing configuration when the relevant integration is used. Live sponsor calls and platform delivery require your accounts. See [developer docs](dev-docs/README.md) for detailed setup and deployment.
+No credentials are in the repo. Sample data: none; every record shown is one the workspace API returned.
