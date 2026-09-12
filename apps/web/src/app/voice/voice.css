@@ -49,6 +49,11 @@
 .va-card[data-ok="1"] { border-color:var(--acc); }
 .va-card pre { margin:6px 0 0; font-family:"Spline Sans Mono",monospace; font-size:.74rem; color:var(--mute); white-space:pre-wrap; word-break:break-word; max-height:140px; overflow:auto; }
 .va-card a { color:var(--acc2); }
+.va-record { position:relative; padding-left:18px; }
+.va-record::before { content:""; position:absolute; left:8px; top:14px; bottom:14px; width:3px; border-radius:3px; background:var(--acc2); }
+.va-record[data-ok="0"]::before { background:var(--bad); }
+.va-record[data-ok=""] { border-style:dashed; }
+.va-record[data-ok=""]::before { background:var(--mute); }
 .va-sheet { position:fixed; left:0; right:0; bottom:0; background:var(--panel); border-top:1px solid var(--line); border-radius:18px 18px 0 0; padding:16px 16px calc(env(safe-area-inset-bottom) + 16px); box-shadow:0 -12px 40px rgba(0,0,0,.5); z-index:20; max-width:720px; margin:0 auto; }
 .va-sheet h3 { margin:0 0 8px; font-size:1rem; }
 .va-sheet pre { font-family:"Spline Sans Mono",monospace; font-size:.8rem; white-space:pre-wrap; word-break:break-word; background:var(--panel2); border-radius:10px; padding:10px; margin:0 0 12px; max-height:30vh; overflow:auto; }
