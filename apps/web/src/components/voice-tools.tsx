@@ -9,12 +9,13 @@
 import { useAgentContext, useFrontendTool } from "@copilotkit/react-core/v2";
 import { z } from "zod";
 
-export type WorkplaceResult = { ok: boolean; status: number; ms?: number; record: unknown };
+/** `slack` is present only on a successful tell_team: "queued" | "disabled" | "error" (see lib/server/slack-bridge.ts). */
+export type WorkplaceResult = { ok: boolean; status: number; ms?: number; record: unknown; slack?: string };
 
 async function workplace(action: string, body: Record<string, unknown>): Promise<WorkplaceResult> {
   const r = await fetch("/api/workplace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, ...body }) });
-  const d = (await r.json()) as { ok?: boolean; status?: number; data?: unknown; ms?: number; error?: string };
-  return { ok: r.ok && d.ok !== false, status: d.status ?? r.status, ms: d.ms, record: d.data ?? d.error };
+  const d = (await r.json()) as { ok?: boolean; status?: number; data?: unknown; ms?: number; error?: string; slack?: string };
+  return { ok: r.ok && d.ok !== false, status: d.status ?? r.status, ms: d.ms, record: d.data ?? d.error, slack: d.slack };
 }
 
 export function VoiceTools({ mode, gate, onResult }: {

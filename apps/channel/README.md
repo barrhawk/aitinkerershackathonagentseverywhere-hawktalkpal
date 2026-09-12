@@ -82,6 +82,49 @@ Demonstrate that earlier messages change the answer and return source links.
 Run npm run verify and document the live Slack checks separately.
 ```
 
+## tell_team → Slack
+
+The voice page's `tell_team` tool posts to the team's Ambiguous AI chat channel
+(`apps/web/src/app/api/workplace/route.ts`). When Slack is configured, the same
+message is echoed into the Slack thread this bot lives in, through a small
+bridge inside this process ([src/bridge.tsx](src/bridge.tsx)):
+
+```
+phone → /api/workplace (tell_team) → Ambiguous write (the action)
+                                   → POST 127.0.0.1:3777/enqueue   (this process)
+                                                  ↓
+                        next @mention / subscribed message → thread.post(...)
+```
+
+The Ambiguous write is never blocked by Slack: the enqueue is bounded to 2 s and
+the route reports `slack: "queued" | "disabled" | "error"`, which the voice
+page shows under the result card.
+
+**Delivery is next-turn, not instant.** This is a limit of the Channels SDK
+(0.9.2), verified in [src/bridge.test.tsx](src/bridge.test.tsx) against the
+SDK's own managed-delivery fixture:
+
+- `thread.post()` exists only on the Thread handed to an inbound handler; there
+  is no "post into channel X" API.
+- Managed delivery closes that Thread once the turn's terminal packet is sent,
+  so a captured handle throws `ChannelDeliveryOperationsClosedError` later.
+- `thread.subscribe()` is documented as "Proactive delivery to subscribed
+  conversations is not yet wired."
+
+So queued messages are posted at the start of the bot's next inbound Slack turn
+(a mention, or any message in a conversation it is subscribed to), before the
+agent runs. The queue is in memory (max 100) and is lost on restart. The single
+call site carries a `TODO(channels-sdk)` for when proactive delivery ships.
+
+| Variable | Meaning |
+|---|---|
+| `INTELLIGENCE_API_KEY`, `CHANNEL_CODE` | Both required. Without both, the web route reports `slack: "disabled"` and sends nothing. |
+| `CHANNEL_BRIDGE_PORT` | Loopback port shared by the web route and this bridge. Default `3777`; set `0` to disable the listener. |
+
+`GET /health` on the bridge returns `{ ok, pending }`. Live Slack delivery of a
+queued message is not exercised offline; the offline tests cover the listener,
+the flush, and the managed-delivery packet the flush produces.
+
 ## Verify and limits
 
 Run `npm run verify` for root/channel typechecks and offline tests. Live Slack delivery, Exa search, and model responses require your own accounts and should be documented separately from local tests.

@@ -1,6 +1,7 @@
 import { createChannel } from "@copilotkit/channels";
 import { isSearchConfigured, isWorkplaceConfigured, WORKPLACE_CONTEXT } from "agent-core";
 import { makeChannelAgent } from "./agent";
+import { tellTeamBridge } from "./bridge";
 import { required } from "./env";
 import { IncidentCard, Timeline, welcomeMessage } from "./components";
 import { proposeAction, readThread, searchTheWeb } from "./tools";
@@ -50,8 +51,13 @@ export const channel = createChannel({
 
 // A mention subscribes the conversation, so the agent then follows along instead
 // of needing to be @-mentioned every single turn.
+//
+// Queued tell_team messages from the voice agent are flushed here, before the
+// agent runs: an inbound turn is the only time the SDK lets us post (see
+// bridge.tsx). The flush never throws, so a Slack failure cannot eat the turn.
 channel.onMention(async ({ thread }) => {
   await thread.subscribe();
+  await tellTeamBridge.flush(thread);
   await thread.runAgent();
 });
 
@@ -59,6 +65,7 @@ channel.onMention(async ({ thread }) => {
 // agent will answer every message in every channel it has been invited to.
 channel.onMessage(async ({ thread }) => {
   if (await thread.isSubscribed()) {
+    await tellTeamBridge.flush(thread);
     await thread.runAgent();
   }
 });

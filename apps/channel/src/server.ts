@@ -6,6 +6,7 @@
 import { createServer } from "node:http";
 import { CopilotKitIntelligence, CopilotRuntime } from "@copilotkit/runtime/v2";
 import { createCopilotNodeListener } from "@copilotkit/runtime/v2/node";
+import { DEFAULT_BRIDGE_PORT, tellTeamBridge } from "./bridge";
 import { channel } from "./channel";
 import { required } from "./env";
 
@@ -36,6 +37,7 @@ const channels = listener.channels;
 const server = createServer(listener);
 
 teardown = async () => {
+  await tellTeamBridge.close();
   await channels.stop();
   if (server.listening) server.close();
 };
@@ -62,3 +64,11 @@ server.listen(port, () => {
   console.log(`\n  ✓ Channel "${process.env.CHANNEL_CODE}" online — listening on :${port}`);
   console.log(`    Invite the bot to a channel (/invite @yourbot), then @-mention it.\n`);
 });
+
+// tell_team → Slack bridge (loopback only). CHANNEL_BRIDGE_PORT=0 disables it.
+// Started only once the Channel is online, so a queued message can actually land.
+const bridgePort = Number(process.env.CHANNEL_BRIDGE_PORT ?? DEFAULT_BRIDGE_PORT);
+if (bridgePort > 0) {
+  await tellTeamBridge.listen(bridgePort);
+  console.log(`  ✓ tell_team bridge on 127.0.0.1:${bridgePort} — queued messages post on the bot's next Slack turn\n`);
+}
