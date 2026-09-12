@@ -1,0 +1,230 @@
+/**
+ * HawkTalk realtime — a minimal browser client for wss://hawktalk.ai/v1/realtime.
+ *
+ * HawkTalk speaks the OpenAI Realtime *event* dialect (session.update,
+ * input_audio_buffer.*, response.create, response.audio.delta, function calls)
+ * over a plain WebSocket with 24 kHz pcm16 both ways, and adds
+ * `x_sample_rate_hz` on audio deltas. This file owns mic capture, playback,
+ * tool round-trips and the latency clock so the voice page can A/B it against
+ * the OpenAI WebRTC session with the same tools and the same transcript.
+ *
+ * Written for the Agents, Everywhere hackathon (2026-09-12).
+ */
+
+export type HawkTool = {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  execute: (args: Record<string, unknown>) => Promise<string>;
+};
+
+export type HawkEvents = {
+  status: (s: "connecting" | "live" | "idle" | "error", detail?: string) => void;
+  transcript: (role: "user" | "agent", text: string, final: boolean) => void;
+  latency: (ms: { firstAudio?: number; done?: number }) => void;
+  tool: (name: string, args: Record<string, unknown>, result?: string) => void;
+  level: (rms: number) => void;
+};
+
+const SAMPLE_RATE = 24000;
+
+function pcm16ToB64(f32: Float32Array): string {
+  const out = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  let bin = "";
+  const bytes = new Uint8Array(out.buffer);
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
+  }
+  return btoa(bin);
+}
+
+/** Linear resample from the hardware rate to 24 kHz. Browsers ignore the requested rate. */
+function resample(input: Float32Array, from: number, to: number): Float32Array {
+  if (from === to) return input;
+  const ratio = from / to;
+  const n = Math.floor(input.length / ratio);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = i * ratio;
+    const i0 = Math.floor(x);
+    const i1 = Math.min(i0 + 1, input.length - 1);
+    out[i] = input[i0] + (input[i1] - input[i0]) * (x - i0);
+  }
+  return out;
+}
+
+export class HawkTalkRealtime {
+  private ws?: WebSocket;
+  private ctx?: AudioContext;
+  private mic?: MediaStream;
+  private micNode?: ScriptProcessorNode;
+  private duck?: GainNode;
+  private playhead = 0;
+  private talking = false;
+  private tCommit = 0;
+  private gotAudio = false;
+  private aiBuf = "";
+  private meBuf = "";
+  private hwRate = 48000;
+
+  constructor(
+    private endpoint: string,
+    private key: string,
+    private instructions: string,
+    private tools: HawkTool[],
+    private on: Partial<HawkEvents>,
+    private voice = "",
+  ) {}
+
+  async connect(): Promise<void> {
+    this.on.status?.("connecting");
+    // Mic first so a denied permission fails before we open a socket.
+    this.mic = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    });
+    this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+    this.hwRate = this.ctx.sampleRate;
+    this.duck = this.ctx.createGain();
+    this.duck.connect(this.ctx.destination);
+
+    const ws = new WebSocket(this.endpoint, ["realtime", "openai-insecure-api-key." + this.key]);
+    this.ws = ws;
+    ws.onopen = () => undefined;
+    ws.onerror = () => this.on.status?.("error", "socket refused — check the HawkTalk key");
+    ws.onclose = () => this.on.status?.("idle");
+    ws.onmessage = (m) => this.handle(JSON.parse(String(m.data)));
+
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("HawkTalk did not answer session.updated")), 15000);
+      const orig = this.on.status;
+      this.on.status = (s, d) => {
+        orig?.(s, d);
+        if (s === "live") { clearTimeout(t); resolve(); }
+        if (s === "error") { clearTimeout(t); reject(new Error(d)); }
+      };
+    });
+  }
+
+  private send(o: unknown) {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(o));
+  }
+
+  private handle(e: Record<string, any>) {
+    switch (e.type) {
+      case "session.created":
+        this.send({
+          type: "session.update",
+          session: {
+            modalities: ["text", "audio"],
+            instructions: this.instructions,
+            input_audio_format: "pcm16",
+            turn_detection: null,
+            ...(this.voice ? { voice: this.voice } : {}),
+            tools: this.tools.map((t) => ({
+              type: "function", name: t.name, description: t.description, parameters: t.parameters,
+            })),
+            tool_choice: "auto",
+          },
+        });
+        break;
+      case "session.updated":
+        this.startMic();
+        this.on.status?.("live");
+        break;
+      case "conversation.item.input_audio_transcription.delta":
+        this.meBuf = e.delta || this.meBuf; this.on.transcript?.("user", this.meBuf, false); break;
+      case "conversation.item.input_audio_transcription.completed":
+        this.on.transcript?.("user", e.transcript || this.meBuf, true); this.meBuf = ""; break;
+      case "response.created":
+        this.aiBuf = ""; this.gotAudio = false; break;
+      case "response.text.delta":
+        this.aiBuf += e.delta || ""; this.on.transcript?.("agent", this.aiBuf, false); break;
+      case "response.audio.delta":
+        if (!this.gotAudio) { this.gotAudio = true; this.on.latency?.({ firstAudio: performance.now() - this.tCommit }); }
+        this.play(e.delta, e.x_sample_rate_hz || SAMPLE_RATE);
+        break;
+      case "response.function_call_arguments.done":
+        void this.runTool(e);
+        break;
+      case "response.done":
+        if (this.aiBuf) this.on.transcript?.("agent", this.aiBuf, true);
+        this.on.latency?.({ done: performance.now() - this.tCommit });
+        this.aiBuf = "";
+        break;
+      case "error":
+        this.on.status?.("error", e.error?.message || "gateway error");
+        break;
+    }
+  }
+
+  private async runTool(e: Record<string, any>) {
+    const tool = this.tools.find((t) => t.name === e.name);
+    let args: Record<string, unknown> = {};
+    try { args = JSON.parse(e.arguments || "{}"); } catch { /* keep empty */ }
+    this.on.tool?.(e.name, args);
+    const output = tool ? await tool.execute(args) : `Unknown tool ${e.name}`;
+    this.on.tool?.(e.name, args, output);
+    this.send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: e.call_id, output } });
+    this.send({ type: "response.create", response: { modalities: ["text", "audio"] } });
+  }
+
+  private startMic() {
+    if (!this.ctx || !this.mic) return;
+    const src = this.ctx.createMediaStreamSource(this.mic);
+    // ScriptProcessor is deprecated but works everywhere without a worklet file.
+    const node = this.ctx.createScriptProcessor(4096, 1, 1);
+    node.onaudioprocess = (ev) => {
+      const input = ev.inputBuffer.getChannelData(0);
+      let sum = 0; for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+      this.on.level?.(Math.sqrt(sum / input.length));
+      if (!this.talking) return;
+      this.send({ type: "input_audio_buffer.append", audio: pcm16ToB64(resample(input, this.hwRate, SAMPLE_RATE)) });
+    };
+    src.connect(node);
+    const sink = this.ctx.createGain(); sink.gain.value = 0; node.connect(sink); sink.connect(this.ctx.destination);
+    this.micNode = node;
+  }
+
+  /** Hold-to-talk: press opens the turn, release commits it. */
+  pressToTalk() {
+    if (!this.ws) return;
+    this.stopPlayback();
+    this.send({ type: "response.cancel" });
+    this.send({ type: "input_audio_buffer.clear" });
+    this.talking = true;
+  }
+  release() {
+    if (!this.talking) return;
+    this.talking = false;
+    this.tCommit = performance.now();
+    this.send({ type: "input_audio_buffer.commit" });
+    this.send({ type: "response.create", response: { modalities: ["text", "audio"] } });
+  }
+
+  private play(b64: string, rate: number) {
+    if (!this.ctx || !this.duck) return;
+    const bin = atob(b64 || ""); if (!bin.length) return;
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const pcm = new Int16Array(bytes.buffer, 0, Math.floor(bytes.length / 2));
+    const buf = this.ctx.createBuffer(1, pcm.length, rate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+    const s = this.ctx.createBufferSource(); s.buffer = buf; s.connect(this.duck);
+    const at = Math.max(this.ctx.currentTime, this.playhead);
+    s.start(at); this.playhead = at + buf.duration;
+  }
+  private stopPlayback() { this.playhead = 0; if (this.duck && this.ctx) { this.duck.disconnect(); this.duck = this.ctx.createGain(); this.duck.connect(this.ctx.destination); } }
+
+  close() {
+    try { this.ws?.close(); } catch { /* noop */ }
+    this.micNode?.disconnect();
+    this.mic?.getTracks().forEach((t) => t.stop());
+    void this.ctx?.close();
+    this.ws = undefined;
+  }
+}
