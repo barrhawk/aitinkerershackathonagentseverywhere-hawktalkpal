@@ -67,3 +67,10 @@
 @media (min-width:640px) { .va-orb { width:170px; height:170px; } }
 .va-foot { margin-top:28px; text-align:center; font-family:"Spline Sans Mono",monospace; font-size:.74rem; }
 .va-foot a { color:var(--acc2); }
+
+/* Phone shell: the page itself scrolls vertically, never sideways. */
+html:has(.va), body:has(.va) { overflow-x:hidden; overflow-y:auto; height:auto; overscroll-behavior-y:contain; -webkit-overflow-scrolling:touch; }
+.va { overflow-x:hidden; width:100%; max-width:min(720px,100vw); }
+.va-chat, .va-results, .va-card, .va-line { min-width:0; overflow-wrap:anywhere; }
+/* Keep the CopilotKit dev inspector (kite badge + pencil) off the demo screen. */
+[data-testid^="cpk-inspector"], [class*="cpk-inspector"], [class*="copilotkit-inspector"] { display:none !important; }
