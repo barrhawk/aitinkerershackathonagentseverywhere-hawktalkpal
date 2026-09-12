@@ -251,22 +251,8 @@ export default function VoicePage() {
   const connectCopilot = useCallback(async () => {
     const rec = new TurnRecorder(); rec.onLevel = (rms) => { setLevel(rms); endRef.current.level(rms); }; await rec.open(); recRef.current = rec;
     const offDuck = onPlayback((playing) => rec.setDuck(playing));
-    const drafts = new Map<string, string>();
-    const sub = {
-      onTextMessageStartEvent: ({ event }: { event: { messageId: string } }) => { drafts.set(event.messageId, ""); },
-      onTextMessageContentEvent: ({ event }: { event: { messageId: string; delta?: string } }) => { drafts.set(event.messageId, (drafts.get(event.messageId) ?? "") + (event.delta ?? "")); },
-      onTextMessageEndEvent: async ({ event }: { event: { messageId: string } }) => {
-        const reply = (drafts.get(event.messageId) ?? "").trim(); drafts.delete(event.messageId);
-        if (!reply) return;
-        setLines((l) => [...l, `agent  ${reply}`]); setThinking("speaking…"); relay("reply", { provider: "copilot", role: "agent", text: reply });
-        try { const started = await speak(reply); if (releaseAt.current) { const ms = Math.round(started - releaseAt.current); pushTurn({ firstAudio: ms, done: ms }); releaseAt.current = 0; } }
-        catch (e) { setError(e instanceof Error ? e.message : String(e)); }
-        setThinking(undefined);
-      },
-    };
     unsubRef.current?.unsubscribe();
-    const s = agent.subscribe(sub as never);
-    unsubRef.current = { unsubscribe: () => { s.unsubscribe(); offDuck(); } };
+    unsubRef.current = { unsubscribe: () => offDuck() };
   }, [agent, pushTurn]);
   const copilotTurn = useCallback(async (wav: Blob) => {
     releaseAt.current = performance.now(); setThinking("transcribing…");
@@ -282,11 +268,34 @@ export default function VoicePage() {
     setThinking("thinking…");
     agent.addMessage({ id: crypto.randomUUID(), role: "user", content: heard.text });
     const before = agent.messages.length;
+    // Subscribe on the agent we are about to run (CopilotKit swaps the instance once runtime info loads).
+    const drafts = new Map<string, string>(); const spoken: Promise<void>[] = [];
+    const sub = agent.subscribe({
+      onTextMessageStartEvent: ({ event }: { event: { messageId: string } }) => { drafts.set(event.messageId, ""); },
+      onTextMessageContentEvent: ({ event }: { event: { messageId: string; delta?: string } }) => { drafts.set(event.messageId, (drafts.get(event.messageId) ?? "") + (event.delta ?? "")); },
+      onTextMessageEndEvent: ({ event }: { event: { messageId: string } }) => {
+        const reply = (drafts.get(event.messageId) ?? "").trim(); drafts.delete(event.messageId);
+        if (!reply) return;
+        setLines((l) => [...l, `agent  ${reply}`]); setThinking("speaking…"); relay("reply", { provider: "copilot", role: "agent", text: reply });
+        spoken.push((async () => {
+          try { const started = await speak(reply); if (releaseAt.current) { const ms = Math.round(started - releaseAt.current); pushTurn({ firstAudio: ms, done: ms }); releaseAt.current = 0; } }
+          catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+        })());
+      },
+    } as never);
     try {
       await copilotkit.runAgent({ agent });   // the core attaches useFrontendTool tools and runs the tool loop
     } catch (e) {
       setLines((l) => [...l, `agent  ⚠ CopilotKit agent failed: ${e instanceof Error ? e.message : String(e)}`]);
+    } finally { sub.unsubscribe(); }
+    // Fallback: if the stream events never reached us, speak the last assistant message from the transcript.
+    const last = agent.messages[agent.messages.length - 1] as { role?: string; content?: unknown } | undefined;
+    if (spoken.length === 0 && agent.messages.length > before && last?.role === "assistant" && typeof last.content === "string" && last.content.trim()) {
+      const reply = last.content.trim(); setLines((l) => [...l, `agent  ${reply}`]); relay("reply", { provider: "copilot", role: "agent", text: reply });
+      spoken.push(speak(reply).then((started) => { if (releaseAt.current) { const ms = Math.round(started - releaseAt.current); pushTurn({ firstAudio: ms, done: ms }); releaseAt.current = 0; } }).catch((e) => setError(e instanceof Error ? e.message : String(e))));
     }
+    await Promise.all(spoken);
+    if (spoken.length) { setThinking(undefined); releaseAt.current = 0; }
     if (agent.messages.length <= before) {
       // Nothing came back: say why, instead of a silent turn. Usually the runtime has no model key.
       let why = "no reply from the CopilotKit runtime";
@@ -294,7 +303,7 @@ export default function VoicePage() {
       setLines((l) => [...l, `agent  ⚠ ${why}`]); releaseAt.current = 0;
     }
     setThinking((t) => (t === "thinking…" ? undefined : t));
-  }, [agent, copilotkit, spokenDecision]);
+  }, [agent, copilotkit, spokenDecision, pushTurn]);
 
   // ── lifecycle ───────────────────────────────────────────────────────────
   const disconnect = useCallback(() => {
