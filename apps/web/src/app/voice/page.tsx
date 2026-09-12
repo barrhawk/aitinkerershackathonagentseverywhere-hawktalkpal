@@ -25,7 +25,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RealtimeAgent, RealtimeSession, tool } from "@openai/agents/realtime";
 import { z } from "zod";
-import { useAgent } from "@copilotkit/react-core/v2";
+import { useAgent, useCopilotKit } from "@copilotkit/react-core/v2";
 import { SYSTEM_PROMPT, searchWebParameters } from "agent-core/shared";
 import { REALTIME_MODEL } from "@/lib/realtime-config";
 import { HawkTalkRealtime, type HawkTool } from "@/lib/hawktalk-realtime";
@@ -38,7 +38,7 @@ import "./voice.css";
 type Provider = "openai" | "hawktalk" | "copilot";
 type Status = "idle" | "connecting" | "live" | "error";
 type Turn = { provider: Provider; firstAudio?: number; done?: number; at: string };
-type Pending = { id: number; name: string; args: Record<string, unknown>; resolve: (ok: boolean) => void };
+type Pending = { id: number; name: string; args: Record<string, unknown>; resolve: (ok: boolean) => void; heard: string };
 type Result = { name: string; ok: boolean; status?: number; ms?: number; record?: unknown; slack?: string; at: string };
 
 const VOICE_RULES = [
@@ -122,6 +122,8 @@ export default function VoicePage() {
   const lockRef = useRef<WakeLockSentinel | null>(null);
   const relayedRef = useRef(new Set<string>());
   const { agent } = useAgent({ agentId: "default" });
+  const { copilotkit } = useCopilotKit();
+  const lastUserText = useRef("");
 
   const now = () => new Date().toLocaleTimeString();
   const pushTurn = useCallback((patch: Partial<Turn>) => {
@@ -158,7 +160,8 @@ export default function VoicePage() {
     new Promise<boolean>((resolve) => {
       const id = ++pendingSeq.current;
       relay("tool_call", { name, args });
-      const item: Pending = { id, name, args, resolve: (ok) => { setPending((q) => { const n = q.filter((x) => x.id !== id); pendingRef.current = n; return n; }); relay("approval", { name, ok }); resolve(ok); } };
+      // Remember the utterance that triggered this write: a spoken yes/no must come from a NEWER one.
+      const item: Pending = { id, name, args, heard: lastUserText.current, resolve: (ok) => { setPending((q) => { const n = q.filter((x) => x.id !== id); pendingRef.current = n; return n; }); relay("approval", { name, ok }); resolve(ok); } };
       setPending((q) => { const n = [...q, item]; pendingRef.current = n; return n; });
     }), []);
   const addResult = useCallback((name: string, res: { ok: boolean; status?: number; ms?: number; record?: unknown; slack?: string }) => {
@@ -175,6 +178,7 @@ export default function VoicePage() {
   /** A spoken yes/no while a sheet is up resolves it, so approval can be hands-free. */
   const spokenDecision = useCallback((text: string) => {
     const q = pendingRef.current; if (!q.length) return false;
+    if (text.trim() === q[0].heard.trim()) return false;   // the sentence that asked for the write is not the answer
     if (YES.test(text) && !NO.test(text)) { q[0].resolve(true); return true; }
     if (NO.test(text)) { q[0].resolve(false); return true; }
     return false;
@@ -204,7 +208,7 @@ export default function VoicePage() {
         relay(it.role === "user" ? "transcript" : "reply", { provider: "openai", role: it.role === "user" ? "user" : "agent", text });
       }
       const lastUser = [...history].reverse().find((it) => it.type === "message" && it.role === "user");
-      if (lastUser && lastUser.type === "message") { const t = lastUser.content.map((p) => ("transcript" in p ? p.transcript ?? "" : "")).join(" "); if (t) spokenDecision(t); }
+      if (lastUser && lastUser.type === "message") { const t = lastUser.content.map((p) => ("transcript" in p ? p.transcript ?? "" : "")).join(" "); if (t) { spokenDecision(t); lastUserText.current = t; } }
     });
     session.on("transport_event", (ev: { type?: string }) => {
       const t = ev.type ?? "";
@@ -232,13 +236,13 @@ export default function VoicePage() {
       status: (s, d) => { if (s === "error") { setError(d); setStatus("error"); } else if (s === "live") setStatus("live"); },
       note: (msg) => { setLines((l) => [...l, `agent  ⚠ ${msg}`]); setThinking(undefined); releaseAt.current = 0; },
       transcript: (role, text, final) => {
-        if (final) { setLive(undefined); setLines((l) => [...l, `${role === "user" ? "you" : "agent"}  ${text}`]); relay(role === "user" ? "transcript" : "reply", { provider: "hawktalk", role: role === "user" ? "user" : "agent", text }); if (role === "user") spokenDecision(text); }
+        if (final) { setLive(undefined); setLines((l) => [...l, `${role === "user" ? "you" : "agent"}  ${text}`]); relay(role === "user" ? "transcript" : "reply", { provider: "hawktalk", role: role === "user" ? "user" : "agent", text }); if (role === "user") { spokenDecision(text); lastUserText.current = text; } }
         else setLive({ role, text });
       },
       latency: (ms) => { if (ms.firstAudio !== undefined) { setThinking("speaking…"); pushTurn({ firstAudio: Math.round(ms.firstAudio) }); } if (ms.done !== undefined) { if (ms.done > 0) pushTurn({ done: Math.round(ms.done) }); setThinking(undefined); releaseAt.current = 0; } },
       level: (rms) => { setLevel(rms); endRef.current.level(rms); },
     }, cfg.voice);
-    await hawk.connect();
+    try { await hawk.connect(); } catch (e) { hawk.close(); throw e; }
     hawkRef.current = hawk;
   }, [pushTurn, runWorkplace, spokenDecision]);
 
@@ -269,11 +273,12 @@ export default function VoicePage() {
     if (!heard.text) { setThinking(undefined); releaseAt.current = 0; return; }
     setLines((l) => [...l, `you  ${heard.text}`]); relay("transcript", { provider: "copilot", role: "user", text: heard.text });
     if (spokenDecision(heard.text)) { setThinking(undefined); releaseAt.current = 0; return; }
+    lastUserText.current = heard.text;
     setThinking("thinking…");
     agent.addMessage({ id: crypto.randomUUID(), role: "user", content: heard.text });
-    await agent.runAgent({});
+    await copilotkit.runAgent({ agent });   // the core attaches useFrontendTool tools and runs the tool loop
     setThinking((t) => (t === "thinking…" ? undefined : t));
-  }, [agent, spokenDecision]);
+  }, [agent, copilotkit, spokenDecision]);
 
   // ── lifecycle ───────────────────────────────────────────────────────────
   const connect = useCallback(async () => {

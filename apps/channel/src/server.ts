@@ -69,6 +69,11 @@ server.listen(port, () => {
 // Started only once the Channel is online, so a queued message can actually land.
 const bridgePort = Number(process.env.CHANNEL_BRIDGE_PORT ?? DEFAULT_BRIDGE_PORT);
 if (bridgePort > 0) {
-  await tellTeamBridge.listen(bridgePort);
-  console.log(`  ✓ tell_team bridge on 127.0.0.1:${bridgePort} — queued messages post on the bot's next Slack turn\n`);
+  try {
+    await tellTeamBridge.listen(bridgePort);
+    console.log(`  ✓ tell_team bridge on 127.0.0.1:${bridgePort} — queued messages post on the bot's next Slack turn\n`);
+  } catch (error) {
+    // A busy port must not take the Slack channel down with it; tell_team just stays Ambiguous-only.
+    console.warn(`  ! tell_team bridge NOT started on 127.0.0.1:${bridgePort} (${error instanceof Error ? error.message : String(error)}); Slack mirroring disabled\n`);
+  }
 }
