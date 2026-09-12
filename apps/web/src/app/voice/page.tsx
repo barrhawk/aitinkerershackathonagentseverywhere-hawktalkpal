@@ -28,6 +28,7 @@ import { CopilotChat, useAgent } from "@copilotkit/react-core/v2";
 import { VoiceTools } from "@/components/voice-tools";
 import { TurnRecorder, transcribe, speak, unlockAudio } from "@/lib/hawk-rest";
 import { WakeWord, Endpointer, wakeWordSupported } from "@/lib/wake-word";
+import "./voice.css";
 
 type Provider = "openai" | "hawktalk" | "copilot";
 type Status = "idle" | "connecting" | "live" | "error";
@@ -266,112 +267,120 @@ export default function VoicePage() {
 
   const avg = (p: Provider, k: "firstAudio" | "done") => { const v = turns.filter((t) => t.provider === p && t[k] !== undefined).map((t) => t[k]!); return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : undefined; };
 
+  const stackName = (p: Provider) => (p === "openai" ? "OpenAI" : p === "copilot" ? "Hawk+CopilotKit" : "HawkTalk");
+  const orbState = status !== "live" ? "off" : holding ? "hold" : thinking?.startsWith("speak") ? "speaking" : thinking ? "thinking" : provider === "openai" ? "open" : "idle";
+  const orbLabel = status !== "live" ? "start first" : provider === "openai" ? (wakeOn && wakeState?.startsWith("listening for") ? "say the wake word" : "listening") : holding ? "release to send" : thinking ?? (wakeOn ? "hold or say it" : "hold to talk");
+  const last = [...turns].reverse().find((t) => t.firstAudio !== undefined);
+  const recordLine = (rec: unknown) => { const r = rec as { id?: string; title?: string; url?: string; error?: string } | string | null; if (!r || typeof r === "string") return String(r ?? ""); return [r.id ? `id ${r.id}` : "", r.title ?? "", r.error ?? ""].filter(Boolean).join(" · "); };
+  const recordUrl = (rec: unknown) => { const r = rec as { url?: string; web_url?: string; link?: string } | null; return (r && (r.url || r.web_url || r.link)) || undefined; };
+
   return (
-    <main className="ck-page">
-      <p className="ck-eyebrow">In the room · A/B</p>
-      <h1>Same agent. Three voice stacks.</h1>
-      <p className="ck-dek">
-        One prompt, one set of tools, one approval gate. Flip between <strong>OpenAI Realtime</strong> ({REALTIME_MODEL}, WebRTC), <strong>HawkTalk</strong> realtime
-        (WebSocket, speech on its own silicon), and <strong>HawkTalk ears + CopilotKit agent</strong>, and every turn is clocked from the end of your sentence to the first sound back.
-        Workplace actions land in Ambiguous AI and are shown here with the record that came back.
-      </p>
+    <main className="va">
+      <header className="va-top">
+        <div>
+          <div className="va-brand">Agents, Everywhere · in the room</div>
+          <h1 className="va-title">Voice A/B</h1>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span className="va-pill" data-s={status}>{status}</span>
+          {status === "live" && <button type="button" className="va-ghost" onClick={disconnect}>End</button>}
+        </div>
+      </header>
 
-      <fieldset style={{ marginTop: "1.5rem", border: 0, padding: 0 }} disabled={status === "live" || status === "connecting"}>
-        <label style={{ marginRight: "1.5rem" }}><input type="radio" name="p" checked={provider === "hawktalk"} onChange={() => setProvider("hawktalk")} /> HawkTalk</label>
-        <label style={{ marginRight: "1.5rem" }}><input type="radio" name="p" checked={provider === "openai"} onChange={() => setProvider("openai")} /> OpenAI Realtime</label>
-        <label><input type="radio" name="p" checked={provider === "copilot"} onChange={() => setProvider("copilot")} /> HawkTalk ears + CopilotKit agent</label>
-      </fieldset>
-
-      <div style={{ marginTop: "0.75rem", display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "center" }}>
-        <label><input type="checkbox" checked={wakeOn} onChange={(e) => setWakeOn(e.target.checked)} /> Wake word</label>
-        <input type="text" value={wakePhrase} onChange={(e) => setWakePhrase(e.target.value)} disabled={!wakeOn} style={{ padding: "0.4rem 0.6rem", minWidth: "10rem" }} aria-label="wake phrase" />
-        {wakeState && <span className="ck-status" data-status={holding ? "live" : "idle"}>{wakeState}</span>}
-      </div>
-
-      <div className="ck-actions" style={{ marginTop: "1rem" }}>
-        {status === "live" ? (
-          <button type="button" className="ck-btn" onClick={disconnect}>End</button>
-        ) : (
-          <button type="button" className="ck-btn ck-btn--primary" onClick={connect} disabled={status === "connecting"}>
-            {status === "connecting" ? "Connecting…" : `Start on ${provider === "openai" ? "OpenAI" : provider === "copilot" ? "HawkTalk + CopilotKit" : "HawkTalk"}`}
+      <div className="va-seg" role="group" aria-label="voice stack">
+        {(["hawktalk", "openai", "copilot"] as Provider[]).map((p) => (
+          <button key={p} type="button" aria-pressed={provider === p} disabled={status === "live" || status === "connecting"} onClick={() => setProvider(p)}>
+            {p === "hawktalk" ? "HawkTalk" : p === "openai" ? "OpenAI Realtime" : "HawkTalk ears + CopilotKit"}
           </button>
-        )}
-        <span className="ck-status" data-status={status}>{status}</span>
+        ))}
       </div>
 
-      {status === "live" && (provider === "hawktalk" || provider === "copilot") && (
-        <button type="button" className="ck-btn ck-btn--primary"
-          style={{ marginTop: "1rem", width: "100%", padding: "1.4rem", fontSize: "1.1rem", background: holding ? "#0a7" : undefined, touchAction: "none" }}
-          onPointerDown={holdStart} onPointerUp={holdEnd} onPointerCancel={holdEnd} onPointerLeave={holdEnd}>
-          {holding ? `Listening… ${"▮".repeat(Math.min(12, Math.round(level * 60)))}` : thinking ?? "Hold to talk"}
+      <div className="va-row">
+        <button type="button" className="va-chip" aria-pressed={wakeOn} onClick={() => setWakeOn(!wakeOn)}>◉ Wake word</button>
+        <input className="va-input" type="text" value={wakePhrase} onChange={(e) => setWakePhrase(e.target.value)} disabled={!wakeOn} aria-label="wake phrase" />
+      </div>
+      {wakeState && <div className="va-hint" style={{ marginTop: 6 }}>{wakeState}</div>}
+
+      <div className="va-stage">
+        <button type="button" className="va-orb" data-state={orbState} disabled={status !== "live" || provider === "openai"}
+          style={{ ["--lvl" as string]: `${Math.min(28, Math.round(level * 160))}px` }}
+          onPointerDown={holdStart} onPointerUp={holdEnd} onPointerCancel={holdEnd} onPointerLeave={holdEnd} onContextMenu={(e) => e.preventDefault()}>
+          {status !== "live" ? "—" : provider === "openai" ? "live" : holding ? "…" : "talk"}
+        </button>
+        <div className="va-state">{orbLabel}</div>
+      </div>
+
+      {status !== "live" && (
+        <button type="button" className="va-primary" onClick={connect} disabled={status === "connecting"}>
+          {status === "connecting" ? "Connecting…" : `Start on ${stackName(provider)}`}
         </button>
       )}
-      {status === "live" && provider === "openai" && (
-        <p className="ck-dek" style={{ marginTop: "1rem" }}>Microphone open with server-side turn detection. Just talk.</p>
-      )}
-
-      {pending.map((pg) => (
-        <article key={pg.id} className="ck-card ck-card--gate" style={{ marginTop: "1.5rem" }}>
-          <h3>Approve: {pg.name === "note_it" ? "create a doc" : "post to the team"}</h3>
-          <pre className="ck-transcript">{JSON.stringify(pg.args, null, 2)}</pre>
-          <div className="ck-actions">
-            <button type="button" className="ck-btn ck-btn--primary" onClick={() => pg.resolve(true)}>Approve</button>
-            <button type="button" className="ck-btn" onClick={() => pg.resolve(false)}>Decline</button>
-          </div>
-        </article>
-      ))}
 
       {error && (
-        <article className="ck-card ck-card--gate" style={{ marginTop: "1.5rem" }}>
-          <h3>Could not connect</h3><p>{error}</p>
-          <p>{provider === "openai" ? <>Check <code>OPENAI_API_KEY</code> and Realtime access.</> : <>Check <code>HAWKTALK_API_KEY</code> and that the HawkTalk gateway is up.</>} Browsers need HTTPS or localhost for the microphone.</p>
+        <article className="va-card va-err">
+          <h3>Could not connect</h3>
+          <div className="va-hint">{error}</div>
+          <div className="va-hint" style={{ marginTop: 6 }}>{provider === "openai" ? "Needs OPENAI_API_KEY with Realtime access." : "Needs HAWKTALK_API_KEY and the HawkTalk gateway up."} Mic needs HTTPS.</div>
         </article>
       )}
 
-      {provider === "copilot" && (
-        <section className="ck-panel ck-assistant" style={{ marginTop: "1.5rem" }}>
-          <header className="ck-assistant-header"><h2>CopilotKit agent</h2><p>Your words go in as a message; approvals and results render here.</p></header>
-          <VoiceTools mode="HawkTalk ears + CopilotKit agent" />
-          <CopilotChat className="ck-chat" agentId="default" labels={{ welcomeMessageText: "Hold the button and talk.", chatInputPlaceholder: "…or type" }} />
-        </section>
-      )}
+      <div className="va-stats">
+        <div className="va-stat" data-hot={last ? "1" : "0"}><b>{last?.firstAudio ?? "–"}</b><small>last turn ms{last ? ` · ${stackName(last.provider)}` : ""}</small></div>
+        <div className="va-stat"><b>{avg("hawktalk", "firstAudio") ?? "–"}</b><small>avg HawkTalk</small></div>
+        <div className="va-stat"><b>{avg("openai", "firstAudio") ?? "–"}</b><small>avg OpenAI</small></div>
+        <div className="va-stat"><b>{avg("copilot", "firstAudio") ?? "–"}</b><small>avg Hawk+CK</small></div>
+      </div>
 
       {(lines.length > 0 || live) && (
-        <section style={{ marginTop: "2rem" }}>
-          <h2 style={{ fontSize: "1.05rem" }}>Transcript</h2>
-          <pre className="ck-transcript">{[...lines, live ? `${live.role === "user" ? "you" : "agent"}  ${live.text} …` : ""].filter(Boolean).join("\n")}</pre>
-        </section>
-      )}
-
-      {turns.length > 0 && (
-        <section style={{ marginTop: "2rem" }}>
-          <h2 style={{ fontSize: "1.05rem" }}>Latency, end of speech → first sound → done</h2>
-          <div style={{ overflowX: "auto" }}>
-            <table className="ck-table">
-              <thead><tr><th>time</th><th>voice</th><th>first audio</th><th>done</th></tr></thead>
-              <tbody>
-                {turns.slice(-8).map((t, i) => (
-                  <tr key={i}><td>{t.at}</td><td>{t.provider}</td><td>{t.firstAudio !== undefined ? `${t.firstAudio} ms` : "…"}</td><td>{t.done !== undefined ? `${t.done} ms` : "…"}</td></tr>
-                ))}
-                <tr><td colSpan={2}><strong>avg HawkTalk</strong></td><td>{avg("hawktalk", "firstAudio") ?? "–"} ms</td><td>{avg("hawktalk", "done") ?? "–"} ms</td></tr>
-                <tr><td colSpan={2}><strong>avg OpenAI</strong></td><td>{avg("openai", "firstAudio") ?? "–"} ms</td><td>{avg("openai", "done") ?? "–"} ms</td></tr>
-                <tr><td colSpan={2}><strong>avg HawkTalk + CopilotKit</strong></td><td>{avg("copilot", "firstAudio") ?? "–"} ms</td><td>{avg("copilot", "done") ?? "–"} ms</td></tr>
-              </tbody>
-            </table>
+        <section className="va-sec">
+          <h2>Conversation</h2>
+          <div className="va-chat">
+            {lines.map((l, i) => { const role = l.startsWith("you") ? "you" : "agent"; return <div key={i} className="va-msg" data-role={role}>{l.replace(/^(you|agent)\s+/, "")}</div>; })}
+            {live && <div className="va-msg" data-role={live.role === "user" ? "you" : "agent"} data-live="1">{live.text}…</div>}
           </div>
         </section>
       )}
 
       {results.length > 0 && (
-        <section style={{ marginTop: "2rem" }}>
-          <h2 style={{ fontSize: "1.05rem" }}>Workplace actions (Ambiguous AI)</h2>
+        <section className="va-sec">
+          <h2>Workplace actions · Ambiguous AI</h2>
           {results.map((r, i) => (
-            <article key={i} className="ck-card" style={{ marginTop: "0.75rem" }}>
-              <h3>{r.name} — {r.ok ? "created" : `failed (${r.status})`}{r.ms ? ` · ${r.ms} ms` : ""}</h3>
-              <pre className="ck-transcript" style={{ maxHeight: 160, overflow: "auto" }}>{typeof r.record === "string" ? r.record : JSON.stringify(r.record, null, 2)}</pre>
+            <article key={i} className="va-card" data-ok={r.ok ? "1" : "0"}>
+              <h3>{r.name === "note_it" ? "Doc created" : "Team message"}{r.ok ? "" : ` failed (${r.status})`}{r.ms ? ` · ${r.ms} ms` : ""} <span className="va-hint">{r.at}</span></h3>
+              <div className="va-hint">{recordLine(r.record)}</div>
+              {recordUrl(r.record) && <a href={recordUrl(r.record)} target="_blank" rel="noreferrer">Open in Ambiguous</a>}
+              <pre>{typeof r.record === "string" ? r.record : JSON.stringify(r.record, null, 2)}</pre>
             </article>
           ))}
         </section>
+      )}
+
+      {turns.length > 1 && (
+        <section className="va-sec">
+          <h2>Turns</h2>
+          <div className="va-card">
+            <pre style={{ maxHeight: 200 }}>{turns.slice(-10).map((t) => `${t.at}  ${stackName(t.provider).padEnd(14)}  first ${t.firstAudio ?? "…"} ms  done ${t.done ?? "…"} ms`).join("\n")}</pre>
+          </div>
+        </section>
+      )}
+
+      {provider === "copilot" && (
+        <details open>
+          <summary>CopilotKit agent · approvals and results render here</summary>
+          <VoiceTools mode="HawkTalk ears + CopilotKit agent" />
+          <CopilotChat className="ck-chat" agentId="default" labels={{ welcomeMessageText: "Hold the orb and talk, or say the wake word.", chatInputPlaceholder: "…or type" }} />
+        </details>
+      )}
+
+      {pending.length > 0 && (
+        <div className="va-sheet" role="dialog" aria-label="approval">
+          <h3>{pending[0].name === "note_it" ? "Create this doc in Ambiguous?" : "Post this to the team?"}{pending.length > 1 ? ` (1 of ${pending.length})` : ""}</h3>
+          <pre>{pending[0].name === "note_it" ? `${String(pending[0].args.title ?? "")}\n\n${String(pending[0].args.content ?? "")}` : String(pending[0].args.content ?? "")}</pre>
+          <div className="va-actions">
+            <button type="button" className="va-no" onClick={() => pending[0].resolve(false)}>Decline</button>
+            <button type="button" className="va-ok" onClick={() => pending[0].resolve(true)}>Approve</button>
+          </div>
+        </div>
       )}
     </main>
   );
