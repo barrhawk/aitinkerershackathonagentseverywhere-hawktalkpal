@@ -6,11 +6,13 @@
  *   note_it   → POST /api/documents            (a doc in the workspace)
  *   tell_team → POST /api/channels/{id}/messages (a chat message)
  */
+import { ambiguousBearer } from "@/lib/server/ambiguous-auth";
+
 const BASE = "https://app.ambiguous.ai";
 
 async function ambiguous(path: string, body: unknown) {
-  const key = process.env.AMBIGUOUS_API_KEY;
-  if (!key) return { ok: false, status: 500, data: { error: "AMBIGUOUS_API_KEY is not set on the server." } };
+  const key = await ambiguousBearer();
+  if (!key) return { ok: false, status: 500, data: { error: "No Ambiguous credential: set AMBIGUOUS_API_KEY or complete the agent claim." } };
   const r = await fetch(BASE + path, {
     method: "POST",
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
@@ -36,8 +38,8 @@ let channelCache: { at: number; list: Array<{ id: string; name?: string; slug?: 
 /** Channel ids are UUIDs; accept a name or slug and look it up (cached for a minute). */
 async function resolveChannel(nameOrId: string): Promise<{ ok: true; id: string } | { ok: false; status: number; data: unknown }> {
   if (UUID.test(nameOrId)) return { ok: true, id: nameOrId };
-  const key = process.env.AMBIGUOUS_API_KEY;
-  if (!key) return { ok: false, status: 500, data: { error: "AMBIGUOUS_API_KEY is not set on the server." } };
+  const key = await ambiguousBearer();
+  if (!key) return { ok: false, status: 500, data: { error: "No Ambiguous credential: set AMBIGUOUS_API_KEY or complete the agent claim." } };
   if (!channelCache || Date.now() - channelCache.at > 60_000) {
     const r = await fetch(`${BASE}/api/channels`, { headers: { Authorization: `Bearer ${key}` } });
     if (!r.ok) return { ok: false, status: r.status, data: { error: `Could not list channels: HTTP ${r.status}` } };
