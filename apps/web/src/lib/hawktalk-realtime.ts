@@ -260,6 +260,9 @@ export class HawkTalkRealtime {
   private async sttThenSend() {
     const frames = this.turnFrames; this.turnFrames = [];
     if (!frames.length) { this.on.note?.("nothing captured"); this.on.latency?.({ done: 0 }); return; }
+    // Silent capture = another app/device owns the mic. Say so instead of sending silence to STT.
+    let peak = 0; for (const c of frames) { const v = new Int16Array(c.buffer, c.byteOffset, c.byteLength >> 1); for (let i = 0; i < v.length; i += 4) { const a = Math.abs(v[i]); if (a > peak) peak = a; } }
+    if (peak < 200) { this.on.note?.(`mic captured silence (peak ${peak}/32767) — another app or device may hold the mic; ctx ${this.ctx?.state ?? "?"} @${this.hwRate} Hz`); this.on.latency?.({ done: 0 }); return; }
     try {
       const wav = wavFromPcm16(frames, SAMPLE_RATE);
       let r: Response; let d: { text?: string; error?: string };

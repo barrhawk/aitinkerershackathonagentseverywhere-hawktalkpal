@@ -308,7 +308,7 @@ export default function VoicePage() {
   const connect = useCallback(async () => {
     disconnect(); // never stack a second session/mic on a failed or live one
     setStatus("connecting"); setError(undefined); setLines([]); setLive(undefined); unlockAudio(); relayedRef.current.clear();
-    relay("stack", { provider, status: "connecting" });
+    relay("stack", { provider, status: "connecting", ua: typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 120) : "" });
     try { if (provider === "openai") await connectOpenAI(); else if (provider === "copilot") await connectCopilot(); else await connectHawk(); setStatus("live"); relay("stack", { provider, status: "live" }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setStatus("error"); }
   }, [provider, connectOpenAI, connectHawk, connectCopilot, disconnect]);
