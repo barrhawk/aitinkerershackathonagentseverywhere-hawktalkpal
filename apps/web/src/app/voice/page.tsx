@@ -39,7 +39,7 @@ type Provider = "openai" | "hawktalk" | "copilot";
 type Status = "idle" | "connecting" | "live" | "error";
 type Turn = { provider: Provider; firstAudio?: number; done?: number; at: string };
 type Pending = { id: number; name: string; args: Record<string, unknown>; resolve: (ok: boolean) => void };
-type Result = { name: string; ok: boolean; status?: number; ms?: number; record?: unknown; at: string };
+type Result = { name: string; ok: boolean; status?: number; ms?: number; record?: unknown; slack?: string; at: string };
 
 const VOICE_RULES = [
   SYSTEM_PROMPT,
@@ -60,8 +60,8 @@ const NO = /\b(no|nope|decline|cancel|don't|do not|stop)\b/i;
 
 async function workplace(action: string, body: Record<string, unknown>): Promise<WorkplaceResult> {
   const r = await fetch("/api/workplace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, ...body }) });
-  const data = (await r.json()) as { ok?: boolean; status?: number; data?: unknown; ms?: number; error?: string };
-  return { ok: r.ok && data.ok !== false, status: data.status ?? r.status, ms: data.ms, record: data.data ?? data.error };
+  const data = (await r.json()) as { ok?: boolean; status?: number; data?: unknown; ms?: number; error?: string; slack?: string };
+  return { ok: r.ok && data.ok !== false, status: data.status ?? r.status, ms: data.ms, record: data.data ?? data.error, slack: data.slack };
 }
 /** Mirror an event to the laptop companion. Never awaited; a dead relay costs the phone nothing. */
 const relay = (type: string, payload: Record<string, unknown> = {}) => {
@@ -150,10 +150,10 @@ export default function VoicePage() {
       const item: Pending = { id, name, args, resolve: (ok) => { setPending((q) => { const n = q.filter((x) => x.id !== id); pendingRef.current = n; return n; }); relay("approval", { name, ok }); resolve(ok); } };
       setPending((q) => { const n = [...q, item]; pendingRef.current = n; return n; });
     }), []);
-  const addResult = useCallback((name: string, res: { ok: boolean; status?: number; ms?: number; record?: unknown }) => {
+  const addResult = useCallback((name: string, res: { ok: boolean; status?: number; ms?: number; record?: unknown; slack?: string }) => {
     setResults((r) => [{ name, ...res, at: now() }, ...r]);
     const rec = res.record && typeof res.record === "object" ? (res.record as { id?: string; title?: string; url?: string; error?: string }) : undefined;
-    relay("result", { name, ok: res.ok, status: res.status, ms: res.ms, id: rec?.id, title: rec?.title, url: rec?.url, error: rec?.error ?? (typeof res.record === "string" ? res.record : undefined) });
+    relay("result", { name, ok: res.ok, status: res.status, ms: res.ms, slack: res.slack, id: rec?.id, title: rec?.title, url: rec?.url, error: rec?.error ?? (typeof res.record === "string" ? res.record : undefined) });
   }, []);
   const runWorkplace = useCallback(async (name: "note_it" | "tell_team", args: Record<string, unknown>) => {
     const ok = await gate(name, args);
@@ -404,6 +404,7 @@ export default function VoicePage() {
             <article key={i} className="va-card" data-ok={r.ok ? "1" : "0"}>
               <h3>{r.name === "note_it" ? "Doc" : "Team message"} {r.ok ? "created" : r.status === 0 ? "declined" : `failed (${r.status})`}{r.ms ? ` · ${r.ms} ms` : ""} <span className="va-hint">{r.at}</span></h3>
               <div className="va-hint">{rec ? [rec.title, rec.id ? `id ${rec.id}` : "", rec.error].filter(Boolean).join(" · ") : typeof r.record === "string" ? r.record : ""}</div>
+              {r.slack && <div className="va-hint">{r.slack === "queued" ? "Slack: queued — posts on the bot's next turn" : r.slack === "disabled" ? "Slack: off (no INTELLIGENCE_API_KEY / CHANNEL_CODE)" : "Slack: bridge unreachable"}</div>}
               {rec?.url && <a href={rec.url} target="_blank" rel="noreferrer">Open in Ambiguous →</a>}
             </article>
           ); })}

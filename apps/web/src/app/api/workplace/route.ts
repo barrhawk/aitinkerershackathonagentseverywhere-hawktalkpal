@@ -5,8 +5,13 @@
  *
  *   note_it   → POST /api/documents            (a doc in the workspace)
  *   tell_team → POST /api/channels/{id}/messages (a chat message)
+ *
+ * tell_team also echoes to Slack through the apps/channel bridge when
+ * INTELLIGENCE_API_KEY and CHANNEL_CODE are set; the response carries
+ * `slack: "queued" | "disabled" | "error"` so the card can say which.
  */
 import { ambiguousBearer } from "@/lib/server/ambiguous-auth";
+import { enqueueTeamPost } from "@/lib/server/slack-bridge";
 
 const BASE = "https://app.ambiguous.ai";
 
@@ -65,7 +70,10 @@ export async function POST(request: Request) {
     const channel = await resolveChannel(body.channel || process.env.AMBIGUOUS_CHANNEL || "general");
     if (!channel.ok) return Response.json({ ok: false, status: channel.status, data: channel.data, action: body.action, ms: Date.now() - t0 }, { status: channel.status });
     const res = await ambiguous(`/api/channels/${encodeURIComponent(channel.id)}/messages`, { content: body.content || "" });
-    return Response.json({ ...res, data: withUrl(res.data, () => `${BASE}/channels/${channel.id}`), action: body.action, ms: Date.now() - t0 }, { status: res.ok ? 200 : res.status });
+    const ambiguousUrl = `${BASE}/channels/${channel.id}`;
+    // Slack is an echo of a write that already happened: bounded to 2 s, never a failure of this request.
+    const slack = res.ok ? await enqueueTeamPost({ content: body.content || "", ambiguousUrl, at: new Date().toISOString() }) : undefined;
+    return Response.json({ ...res, data: withUrl(res.data, () => ambiguousUrl), action: body.action, ms: Date.now() - t0, ...(slack ? { slack } : {}) }, { status: res.ok ? 200 : res.status });
   }
   return Response.json({ error: "Unknown action" }, { status: 400 });
 }
