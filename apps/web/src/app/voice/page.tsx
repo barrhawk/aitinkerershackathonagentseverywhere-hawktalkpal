@@ -26,12 +26,12 @@ import { REALTIME_MODEL } from "@/lib/realtime-config";
 import { HawkTalkRealtime, type HawkTool } from "@/lib/hawktalk-realtime";
 import { CopilotChat, useAgent } from "@copilotkit/react-core/v2";
 import { VoiceTools } from "@/components/voice-tools";
-import { TurnRecorder, transcribe, speak } from "@/lib/hawk-rest";
+import { TurnRecorder, transcribe, speak, unlockAudio } from "@/lib/hawk-rest";
 
 type Provider = "openai" | "hawktalk" | "copilot";
 type Status = "idle" | "connecting" | "live" | "error";
 type Turn = { provider: Provider; firstAudio?: number; done?: number; at: string };
-type Pending = { name: string; args: Record<string, unknown>; resolve: (ok: boolean) => void };
+type Pending = { id: number; name: string; args: Record<string, unknown>; resolve: (ok: boolean) => void };
 type Result = { name: string; ok: boolean; status?: number; ms?: number; record?: unknown; at: string };
 
 const VOICE_RULES = [
@@ -67,7 +67,8 @@ export default function VoicePage() {
   const [lines, setLines] = useState<string[]>([]);
   const [live, setLive] = useState<{ role: string; text: string }>();
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [pending, setPending] = useState<Pending>();
+  const [pending, setPending] = useState<Pending[]>([]);
+  const pendingSeq = useRef(0);
   const [results, setResults] = useState<Result[]>([]);
   const [holding, setHolding] = useState(false);
   const [level, setLevel] = useState(0);
@@ -92,13 +93,16 @@ export default function VoicePage() {
   }, []);
   const openTurn = useCallback((p: Provider) => { turnRef.current = { provider: p, at: now() }; setTurns((ts) => [...ts, turnRef.current!]); }, []);
 
-  /** The tap-to-approve gate, shared by both providers. */
+  /** The tap-to-approve gate for the two realtime providers; the CopilotKit mode uses its own human-in-the-loop card. */
   const gate = useCallback((name: string, args: Record<string, unknown>) =>
-    new Promise<boolean>((resolve) => setPending({ name, args, resolve })), []);
+    new Promise<boolean>((resolve) => {
+      const id = ++pendingSeq.current;
+      // One card per call: two tools in one turn ("note X and tell the team Y") must both get answered.
+      setPending((q) => [...q, { id, name, args, resolve: (ok) => { setPending((q2) => q2.filter((x) => x.id !== id)); resolve(ok); } }]);
+    }), []);
 
   const runWorkplace = useCallback(async (name: "note_it" | "tell_team", args: Record<string, unknown>) => {
     const ok = await gate(name, args);
-    setPending(undefined);
     if (!ok) { setResults((r) => [{ name, ok: false, status: 0, record: "declined by user", at: now() }, ...r]); return "The user declined. Do not retry unless asked."; }
     const res = await workplace(name, args);
     setResults((r) => [{ name, ...res, at: now() }, ...r]);
@@ -158,32 +162,43 @@ export default function VoicePage() {
   }, [pushTurn, runWorkplace]);
 
   // ── HawkTalk ears + CopilotKit agent ─────────────────────────────────────
+  const releaseAt = useRef(0);
+  const unsubRef = useRef<{ unsubscribe: () => void } | null>(null);
   const connectCopilot = useCallback(async () => {
     const rec = new TurnRecorder(); await rec.open(); recRef.current = rec;
-  }, []);
+    // Speak every assistant message the agent finishes, including the one it
+    // produces after an approval card is answered (that is a second run the
+    // page does not start itself). Deltas are accumulated per message id.
+    const drafts = new Map<string, string>();
+    const sub = {
+      onTextMessageStartEvent: ({ event }: { event: { messageId: string } }) => { drafts.set(event.messageId, ""); },
+      onTextMessageContentEvent: ({ event }: { event: { messageId: string; delta?: string } }) => { drafts.set(event.messageId, (drafts.get(event.messageId) ?? "") + (event.delta ?? "")); },
+      onTextMessageEndEvent: async ({ event }: { event: { messageId: string } }) => {
+        const reply = (drafts.get(event.messageId) ?? "").trim(); drafts.delete(event.messageId);
+        if (!reply) return;
+        setLines((l) => [...l, `agent  ${reply}`]);
+        setThinking("speaking…");
+        try {
+          const started = await speak(reply);
+          if (releaseAt.current) { const ms = Math.round(started - releaseAt.current); pushTurn({ firstAudio: ms, done: ms }); releaseAt.current = 0; }
+        } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+        setThinking(undefined);
+      },
+    };
+    unsubRef.current?.unsubscribe();
+    unsubRef.current = agent.subscribe(sub as never);
+  }, [agent, pushTurn]);
   const copilotTurn = useCallback(async (wav: Blob) => {
-    const tRelease = performance.now();
+    releaseAt.current = performance.now();
     setThinking("transcribing…");
     const heard = await transcribe(wav);
-    if (!heard.text) { setThinking(undefined); return; }
+    if (!heard.text) { setThinking(undefined); releaseAt.current = 0; return; }
     setLines((l) => [...l, `you  ${heard.text}`]);
     setThinking("thinking…");
-    let reply = "";
-    const sub = { onTextMessageContentEvent: ({ event }: { event: { delta?: string } }) => { reply += event.delta ?? ""; } };
     agent.addMessage({ id: crypto.randomUUID(), role: "user", content: heard.text });
-    await agent.runAgent({}, sub as never);
-    if (!reply) {
-      const last = [...agent.messages].reverse().find((m) => m.role === "assistant" && typeof (m as { content?: unknown }).content === "string");
-      reply = last ? String((last as { content?: string }).content) : "";
-    }
-    setLines((l) => [...l, `agent  ${reply}`]);
-    setThinking("speaking…");
-    if (reply) {
-      const started = await speak(reply);
-      pushTurn({ firstAudio: Math.round(started - tRelease), done: Math.round(started - tRelease) });
-    }
-    setThinking(undefined);
-  }, [agent, pushTurn]);
+    await agent.runAgent({});
+    setThinking((t) => (t === "thinking…" ? undefined : t));
+  }, [agent]);
 
   const connect = useCallback(async () => {
     setStatus("connecting"); setError(undefined); setLines([]); setLive(undefined);
@@ -195,12 +210,15 @@ export default function VoicePage() {
     oaRef.current?.close(); oaRef.current = null;
     hawkRef.current?.close(); hawkRef.current = null;
     recRef.current?.close(); recRef.current = null;
+    unsubRef.current?.unsubscribe(); unsubRef.current = null;
+    setPending((q) => { q.forEach((x) => x.resolve(false)); return []; });
     setStatus("idle"); setHolding(false); setThinking(undefined);
   }, []);
   useEffect(() => () => disconnect(), [disconnect]);
 
   const holdStart = () => {
-    if (recRef.current) { setHolding(true); recRef.current.start(); return; }
+    unlockAudio();
+    if (recRef.current) { if (thinking) return; setHolding(true); recRef.current.start(); return; }
     if (!hawkRef.current) return; setHolding(true); hawkRef.current.pressToTalk();
   };
   const holdEnd = () => {
@@ -214,10 +232,10 @@ export default function VoicePage() {
   return (
     <main className="ck-page">
       <p className="ck-eyebrow">In the room · A/B</p>
-      <h1>Same agent. Two voices.</h1>
+      <h1>Same agent. Three voice stacks.</h1>
       <p className="ck-dek">
-        One prompt, one set of tools, one approval gate. Flip the voice stack between <strong>OpenAI Realtime</strong> ({REALTIME_MODEL}, WebRTC)
-        and <strong>HawkTalk</strong> (WebSocket, speech on its own silicon), and every turn is clocked from the end of your sentence to the first sound back.
+        One prompt, one set of tools, one approval gate. Flip between <strong>OpenAI Realtime</strong> ({REALTIME_MODEL}, WebRTC), <strong>HawkTalk</strong> realtime
+        (WebSocket, speech on its own silicon), and <strong>HawkTalk ears + CopilotKit agent</strong>, and every turn is clocked from the end of your sentence to the first sound back.
         Workplace actions land in Ambiguous AI and are shown here with the record that came back.
       </p>
 
@@ -249,16 +267,16 @@ export default function VoicePage() {
         <p className="ck-dek" style={{ marginTop: "1rem" }}>Microphone open with server-side turn detection. Just talk.</p>
       )}
 
-      {pending && (
-        <article className="ck-card ck-card--gate" style={{ marginTop: "1.5rem" }}>
-          <h3>Approve: {pending.name === "note_it" ? "create a doc" : "post to the team"}</h3>
-          <pre className="ck-transcript">{JSON.stringify(pending.args, null, 2)}</pre>
+      {pending.map((pg) => (
+        <article key={pg.id} className="ck-card ck-card--gate" style={{ marginTop: "1.5rem" }}>
+          <h3>Approve: {pg.name === "note_it" ? "create a doc" : "post to the team"}</h3>
+          <pre className="ck-transcript">{JSON.stringify(pg.args, null, 2)}</pre>
           <div className="ck-actions">
-            <button type="button" className="ck-btn ck-btn--primary" onClick={() => pending.resolve(true)}>Approve</button>
-            <button type="button" className="ck-btn" onClick={() => pending.resolve(false)}>Decline</button>
+            <button type="button" className="ck-btn ck-btn--primary" onClick={() => pg.resolve(true)}>Approve</button>
+            <button type="button" className="ck-btn" onClick={() => pg.resolve(false)}>Decline</button>
           </div>
         </article>
-      )}
+      ))}
 
       {error && (
         <article className="ck-card ck-card--gate" style={{ marginTop: "1.5rem" }}>

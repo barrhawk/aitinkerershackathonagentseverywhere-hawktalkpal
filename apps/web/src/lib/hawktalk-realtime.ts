@@ -99,7 +99,7 @@ export class HawkTalkRealtime {
     ws.onmessage = (m) => this.handle(JSON.parse(String(m.data)));
 
     await new Promise<void>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error("HawkTalk did not answer session.updated")), 15000);
+      const t = setTimeout(() => reject(new Error("HawkTalk did not answer session.updated")), 30000);
       const orig = this.on.status;
       this.on.status = (s, d) => {
         orig?.(s, d);
@@ -142,6 +142,8 @@ export class HawkTalkRealtime {
       case "response.created":
         this.aiBuf = ""; this.gotAudio = false; break;
       case "response.text.delta":
+      case "response.audio_transcript.delta":
+      case "response.output_audio_transcript.delta":
         this.aiBuf += e.delta || ""; this.on.transcript?.("agent", this.aiBuf, false); break;
       case "response.audio.delta":
         if (!this.gotAudio) { this.gotAudio = true; this.on.latency?.({ firstAudio: performance.now() - this.tCommit }); }
@@ -192,6 +194,7 @@ export class HawkTalkRealtime {
   /** Hold-to-talk: press opens the turn, release commits it. */
   pressToTalk() {
     if (!this.ws) return;
+    void this.ctx?.resume();
     this.stopPlayback();
     this.send({ type: "response.cancel" });
     this.send({ type: "input_audio_buffer.clear" });

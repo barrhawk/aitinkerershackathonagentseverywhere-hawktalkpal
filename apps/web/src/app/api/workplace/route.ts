@@ -21,6 +21,26 @@ async function ambiguous(path: string, body: unknown) {
   return { ok: r.ok, status: r.status, data };
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+let channelCache: { at: number; list: Array<{ id: string; name?: string; slug?: string }> } | undefined;
+
+/** Channel ids are UUIDs; accept a name or slug and look it up (cached for a minute). */
+async function resolveChannel(nameOrId: string): Promise<{ ok: true; id: string } | { ok: false; status: number; data: unknown }> {
+  if (UUID.test(nameOrId)) return { ok: true, id: nameOrId };
+  const key = process.env.AMBIGUOUS_API_KEY;
+  if (!key) return { ok: false, status: 500, data: { error: "AMBIGUOUS_API_KEY is not set on the server." } };
+  if (!channelCache || Date.now() - channelCache.at > 60_000) {
+    const r = await fetch(`${BASE}/api/channels`, { headers: { Authorization: `Bearer ${key}` } });
+    if (!r.ok) return { ok: false, status: r.status, data: { error: `Could not list channels: HTTP ${r.status}` } };
+    const j = (await r.json()) as unknown;
+    const list = (Array.isArray(j) ? j : (j as { data?: unknown; channels?: unknown; items?: unknown }).data ?? (j as { channels?: unknown }).channels ?? (j as { items?: unknown }).items ?? []) as Array<{ id: string; name?: string; slug?: string }>;
+    channelCache = { at: Date.now(), list };
+  }
+  const want = nameOrId.toLowerCase().replace(/^#/, "");
+  const hit = channelCache.list.find((c) => (c.name ?? "").toLowerCase() === want || (c.slug ?? "").toLowerCase() === want) ?? channelCache.list[0];
+  return hit ? { ok: true, id: hit.id } : { ok: false, status: 404, data: { error: `No channel named ${nameOrId} and no channels in the workspace.` } };
+}
+
 export async function POST(request: Request) {
   const body = (await request.json()) as { action?: string; title?: string; content?: string; channel?: string };
   const t0 = Date.now();
@@ -31,8 +51,9 @@ export async function POST(request: Request) {
     return Response.json({ ...res, action: body.action, ms: Date.now() - t0 }, { status: res.ok ? 200 : res.status });
   }
   if (body.action === "tell_team") {
-    const channel = body.channel || process.env.AMBIGUOUS_CHANNEL || "general";
-    const res = await ambiguous(`/api/channels/${encodeURIComponent(channel)}/messages`, { content: body.content || "" });
+    const channel = await resolveChannel(body.channel || process.env.AMBIGUOUS_CHANNEL || "general");
+    if (!channel.ok) return Response.json({ ok: false, status: channel.status, data: channel.data, action: body.action, ms: Date.now() - t0 }, { status: channel.status });
+    const res = await ambiguous(`/api/channels/${encodeURIComponent(channel.id)}/messages`, { content: body.content || "" });
     return Response.json({ ...res, action: body.action, ms: Date.now() - t0 }, { status: res.ok ? 200 : res.status });
   }
   return Response.json({ error: "Unknown action" }, { status: 400 });

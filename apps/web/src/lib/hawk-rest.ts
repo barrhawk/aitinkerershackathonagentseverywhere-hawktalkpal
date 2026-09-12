@@ -51,12 +51,23 @@ export async function transcribe(wav: Blob): Promise<{ text: string; ms?: number
   return { text: d.text, ms: d.ms };
 }
 
+let player: HTMLAudioElement | undefined;
+/** Call from a user gesture: mobile browsers only allow playback started by a tap, and the reply arrives seconds later. */
+export function unlockAudio() {
+  if (!player) { player = new Audio(); player.preload = "auto"; }
+  player.muted = true;
+  player.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
+  void player.play().catch(() => undefined);
+  player.muted = false;
+}
+
 /** Render and play; resolves with the time the audio actually started. */
 export async function speak(text: string): Promise<number> {
   const r = await fetch("/api/hawk/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
   if (!r.ok) { const d = (await r.json().catch(() => ({}))) as { error?: string }; throw new Error(d.error ?? `TTS failed (${r.status})`); }
   const url = URL.createObjectURL(await r.blob());
-  const a = new Audio(url);
+  const a = player ?? (player = new Audio());
+  a.src = url;
   return new Promise<number>((resolve, reject) => {
     a.onplaying = () => resolve(performance.now());
     a.onerror = () => reject(new Error("audio playback failed"));
