@@ -113,7 +113,7 @@ export default function VoicePage() {
   const unsubRef = useRef<{ unsubscribe: () => void } | null>(null);
   const wakeRef = useRef<WakeWord | null>(null);
   const wakeOnRef = useRef(false);
-  const endRef = useRef(new Endpointer(0.012, 700, 8000));
+  const endRef = useRef(new Endpointer(0.012, 900, 8000));
   const pendingSeq = useRef(0);
   const pendingRef = useRef<Pending[]>([]);
   const clock = useRef<{ t0: number; got: boolean }>({ t0: 0, got: false });
@@ -209,8 +209,7 @@ export default function VoicePage() {
       if (!r.ok || !data.value) throw new Error(data.error ?? "Could not mint a session token.");
       apiKey = data.value;
     }
-    // semantic_vad is the SDK default at eagerness "auto", which can sit on a finished sentence; "high" answers sooner.
-    const session = new RealtimeSession(rtAgent, { transport: "webrtc", model: REALTIME_MODEL, config: { audio: { input: { turnDetection: { type: "semantic_vad", eagerness: "high" } } } } });
+    const session = new RealtimeSession(rtAgent, { transport: "webrtc", model: REALTIME_MODEL });
     session.on("history_updated", (history) => {
       const out = history.filter((it) => it.type === "message").map((it) => {
         const text = it.content.map((p) => ("transcript" in p ? p.transcript ?? "" : "text" in p ? p.text : "")).join(" ").trim();
@@ -292,8 +291,9 @@ export default function VoicePage() {
     const before = agent.messages.length;
     // Subscribe on the agent we are about to run (CopilotKit swaps the instance once runtime info loads).
     // Speak while the reply streams: each finished sentence goes to TTS at once (in parallel) and plays in order.
+    let heardFirst: () => void = () => undefined; const firstSound = new Promise<void>((res) => { heardFirst = res; });
     const voice = createSpeechQueue(
-      (started) => { setThinking("speaking…"); if (releaseAt.current) { const ms = Math.round(started - releaseAt.current); pushTurn({ firstAudio: ms, done: ms }); releaseAt.current = 0; } },
+      (started) => { heardFirst(); setThinking("speaking…"); if (releaseAt.current) { const ms = Math.round(started - releaseAt.current); pushTurn({ firstAudio: ms, done: ms }); releaseAt.current = 0; } },
       (e) => setError(e instanceof Error ? e.message : String(e)),
     );
     const drafts = new Map<string, { text: string; said: number }>();
@@ -301,7 +301,7 @@ export default function VoicePage() {
     const sayReady = (d: { text: string; said: number }) => {
       SENTENCE.lastIndex = d.said; let end = -1; let m: RegExpExecArray | null;
       while ((m = SENTENCE.exec(d.text))) end = m.index + m[0].length;
-      if (end > d.said) { voice.say(d.text.slice(d.said, end)); d.said = end; }
+      if (end - d.said >= 20) { voice.say(d.text.slice(d.said, end)); d.said = end; }
     };
     const finish = (id: string) => {
       const d = drafts.get(id); drafts.delete(id); if (!d) return;
@@ -328,7 +328,8 @@ export default function VoicePage() {
       const reply = last.content.trim(); setLines((l) => [...l, `agent  ${reply}`]); relay("reply", { provider: "copilot", role: "agent", text: reply });
       voice.say(reply);
     }
-    await voice.drain();
+    // Clear "speaking…" at first sound (as before): the orb must take a new hold and the native wake listener must get the mic back while the reply plays.
+    await Promise.race([firstSound, voice.drain()]);
     if (voice.count) { setThinking(undefined); releaseAt.current = 0; }
     if (agent.messages.length <= before) {
       // Nothing came back: say why, instead of a silent turn. Usually the runtime has no model key.
